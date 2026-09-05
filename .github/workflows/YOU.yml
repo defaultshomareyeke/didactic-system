@@ -141,6 +141,16 @@ jobs:
           $shortcut.WorkingDirectory = $desktop
           $shortcut.Save()
 
+      - name: '1b. Upload RDP connection files'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-connection-${{ github.run_number }}
+          path: |
+            C:\Users\Public\Desktop\RDP-Connection.rdp
+            C:\Users\Public\Desktop\RDP-Connection.lnk
+          if-no-files-found: error
+          retention-days: 1
+
       - name: '2. Enable Remote Desktop & Create Admin Account'
         shell: powershell
         run: |
