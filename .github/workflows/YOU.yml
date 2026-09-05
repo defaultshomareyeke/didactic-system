@@ -23,6 +23,11 @@ on:
         required: false
         type: boolean
         default: true
+      install_qbittorrent:
+        description: 'Install qBittorrent'
+        required: false
+        type: boolean
+        default: true
       install_projects:
         description: 'Download MoneyPrinter projects'
         required: false
@@ -46,6 +51,10 @@ on:
         description: 'Port for the remote status dashboard'
         required: false
         default: '8080'
+      download_port:
+        description: 'Port for downloading server files in a browser'
+        required: false
+        default: '8081'
 
 jobs:
   build:
@@ -192,11 +201,12 @@ jobs:
           INSTALL_PYTHON: ${{ inputs.install_python }}
           INSTALL_VSCODE: ${{ inputs.install_vscode }}
           INSTALL_WINRAR: ${{ inputs.install_winrar }}
+          INSTALL_QBITTORRENT: ${{ inputs.install_qbittorrent }}
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           Start-Transcript -Path "D:\install.log" -Force | Out-Null
-          Write-Host "Installing Python, VS Code and WinRAR to their default paths; Ollama to D:..."
+          Write-Host "Installing Python, VS Code, WinRAR and qBittorrent to their default paths; Ollama to D:..."
           New-Item -ItemType Directory -Force -Path "C:\actions-cache\installers" | Out-Null
 
           New-Item -ItemType Directory -Force -Path "D:\Ollama" | Out-Null
@@ -246,6 +256,25 @@ jobs:
 
           $jobs += $winrarJob
           }
+          if ($env:INSTALL_QBITTORRENT -eq "true") {
+          $qbittorrentJob = Start-Job -ScriptBlock {
+              $ErrorActionPreference = "Stop"
+              $ProgressPreference = "SilentlyContinue"
+              $qbittorrent = "C:\Program Files\qBittorrent\qbittorrent.exe"
+              if (!(Test-Path $qbittorrent)) {
+                  $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+                  if ($winget) {
+                      & $winget.Source install --id qBittorrent.qBittorrent --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+                      if ($LASTEXITCODE -ne 0) { throw "WinGet qBittorrent installation failed with exit code $LASTEXITCODE." }
+                  } else {
+                      & choco install qbittorrent -y --no-progress
+                      if ($LASTEXITCODE -ne 0) { throw "Chocolatey qBittorrent installation failed with exit code $LASTEXITCODE." }
+                  }
+              }
+          }
+
+          $jobs += $qbittorrentJob
+          }
           $ollamaJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
@@ -294,9 +323,10 @@ jobs:
               "Python" = $pythonExe
               "VS Code" = "C:\Program Files\Microsoft VS Code\Code.exe"
               "WinRAR" = "C:\Program Files\WinRAR\WinRAR.exe"
+              "qBittorrent" = "C:\Program Files\qBittorrent\qbittorrent.exe"
               "Ollama" = "D:\Ollama\ollama.exe"
           }
-          $enabled = @{ Python = ($env:INSTALL_PYTHON -eq "true"); "VS Code" = ($env:INSTALL_VSCODE -eq "true"); WinRAR = ($env:INSTALL_WINRAR -eq "true"); Ollama = $true }
+          $enabled = @{ Python = ($env:INSTALL_PYTHON -eq "true"); "VS Code" = ($env:INSTALL_VSCODE -eq "true"); WinRAR = ($env:INSTALL_WINRAR -eq "true"); qBittorrent = ($env:INSTALL_QBITTORRENT -eq "true"); Ollama = $true }
           foreach ($name in $verification.Keys) {
               if (-not $enabled[$name]) { Write-Host "$name : SKIPPED"; continue }
               $path = $verification[$name]
@@ -356,16 +386,25 @@ jobs:
           $Base = "D:\MoneyPrinters"
           New-Item -ItemType Directory -Force -Path $Base | Out-Null
 
-          $cloneJobs = @(
-            (Start-Job -ScriptBlock { git clone --depth 1 --no-tags --filter=blob:none https://github.com/FujiwaraChoki/MoneyPrinter.git "D:\MoneyPrinters\MoneyPrinter" }),
-            (Start-Job -ScriptBlock { git clone --depth 1 --no-tags --filter=blob:none https://github.com/FujiwaraChoki/MoneyPrinterV2.git "D:\MoneyPrinters\MoneyPrinterV2" }),
-            (Start-Job -ScriptBlock { git clone --depth 1 --no-tags --filter=blob:none https://github.com/harry0703/MoneyPrinterTurbo.git "D:\MoneyPrinters\MoneyPrinterTurbo" })
+          $repositories = @(
+            @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinter.git'; Target = 'D:\MoneyPrinters\MoneyPrinter' },
+            @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinterV2.git'; Target = 'D:\MoneyPrinters\MoneyPrinterV2' },
+            @{ Url = 'https://github.com/harry0703/MoneyPrinterTurbo.git'; Target = 'D:\MoneyPrinters\MoneyPrinterTurbo' }
           )
+          $cloneJobs = foreach ($repo in $repositories) {
+            Start-Job -ArgumentList $repo.Url, $repo.Target -ScriptBlock {
+              param($Url, $Target)
+              $gitOutput = & git clone --depth 1 --no-tags --filter=blob:none $Url $Target 2>&1
+              $gitExitCode = $LASTEXITCODE
+              $gitOutput | ForEach-Object { Write-Output $_.ToString() }
+              if ($gitExitCode -ne 0) { throw "Git clone failed for $Url with exit code $gitExitCode." }
+            }
+          }
           $deadline = (Get-Date).AddMinutes(20)
           while ((Get-Date) -lt $deadline -and @($cloneJobs | Where-Object State -in @('Running','NotStarted')).Count) { Start-Sleep 3 }
           foreach ($job in $cloneJobs) {
             if ($job.State -ne 'Completed') { Stop-Job $job; throw "A MoneyPrinter clone failed or timed out." }
-            Receive-Job $job -ErrorAction Stop
+            Receive-Job $job -ErrorAction Continue
             Remove-Job $job -Force
           }
 
@@ -386,14 +425,24 @@ jobs:
               Start-Job -ArgumentList $Project -ScriptBlock {
                   param($Target)
                   $tmp = Join-Path $env:TEMP ("vazirmatn-" + [guid]::NewGuid())
-                  git clone --depth 1 --no-tags --filter=blob:none https://github.com/rastikerdar/vazirmatn.git $tmp
-                  if ($LASTEXITCODE -ne 0) { throw "Vazirmatn download failed." }
+                  $gitOutput = & git clone --depth 1 --no-tags --filter=blob:none https://github.com/rastikerdar/vazirmatn.git $tmp 2>&1
+                  $gitExitCode = $LASTEXITCODE
+                  $gitOutput | ForEach-Object { Write-Output $_.ToString() }
+                  if ($gitExitCode -ne 0) { throw "Vazirmatn download failed with exit code $gitExitCode." }
                   Get-ChildItem $tmp -Recurse -Include *.ttf,*.otf | ForEach-Object { Copy-Item $_.FullName (Join-Path $Target 'fonts') -Force }
                   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
               }
           }
           Wait-Job $fontJobs -Timeout 900 | Out-Null
-          foreach ($job in $fontJobs) { Receive-Job $job -ErrorAction Stop; Remove-Job $job -Force }
+          foreach ($job in $fontJobs) {
+              if ($job.State -ne 'Completed') {
+                  Receive-Job $job -ErrorAction Continue
+                  Remove-Job $job -Force
+                  throw "A Vazirmatn download failed or timed out."
+              }
+              Receive-Job $job -ErrorAction Continue
+              Remove-Job $job -Force
+          }
           Write-Host "Vazirmatn installed."
 
       - name: '7. Create Desktop Shortcuts'
@@ -405,7 +454,8 @@ jobs:
           $items = @(
             @{ Name = 'Ollama'; Target = 'D:\Ollama\ollama.exe'; Args = 'serve'; Work = 'D:\Ollama' },
             @{ Name = 'MoneyPrinter Projects'; Target = 'D:\MoneyPrinters'; Args = ''; Work = 'D:\MoneyPrinters' },
-            @{ Name = 'VS Code'; Target = 'C:\Program Files\Microsoft VS Code\Code.exe'; Args = 'D:\MoneyPrinters'; Work = 'D:\MoneyPrinters' }
+            @{ Name = 'VS Code'; Target = 'C:\Program Files\Microsoft VS Code\Code.exe'; Args = 'D:\MoneyPrinters'; Work = 'D:\MoneyPrinters' },
+            @{ Name = 'qBittorrent'; Target = 'C:\Program Files\qBittorrent\qbittorrent.exe'; Args = ''; Work = 'C:\Program Files\qBittorrent' }
           )
           foreach ($item in $items) {
             if ((Test-Path $item.Target) -or ($item.Name -eq 'MoneyPrinter Projects')) {
@@ -516,6 +566,38 @@ jobs:
           "### Remote dashboard`n[$url]($url)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nDashboard URL: $url"
 
+      - name: '9b. Start Browser Download Server'
+        shell: powershell
+        env:
+          DOWNLOAD_PORT: ${{ inputs.download_port }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $downloadDirectory = "D:\Downloads"
+          $port = [int]$env:DOWNLOAD_PORT
+          if ($port -lt 1024 -or $port -gt 65535) { throw "Download port must be between 1024 and 65535." }
+          New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
+          New-NetFirewallRule -DisplayName "Browser Download Server $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -ErrorAction SilentlyContinue | Out-Null
+
+          $python = "C:\Program Files\Python312\python.exe"
+          if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw "Python is required to start the download server." }
+
+          $downloadServer = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','0.0.0.0','--directory',$downloadDirectory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\download-server.log" -RedirectStandardError "D:\download-server-error.log"
+          Start-Sleep -Seconds 2
+          if ($downloadServer.HasExited) { throw "Browser download server failed to start." }
+
+          $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
+          $downloadUrl = "http://$ip`:$port/"
+          Write-Host "Download server URL: $downloadUrl"
+          "### Download files from the RDP server`n[$downloadUrl]($downloadUrl)`n`nPlace files in ``D:\Downloads``." | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          @"
+          [InternetShortcut]
+          URL=$downloadUrl
+          "@ | Set-Content (Join-Path $desktop 'Download-Files.url')
+          Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nDownload URL: $downloadUrl`nDownload folder: D:\Downloads"
+
       - name: '9. Keep Server Alive'
         env:
           KEEP_ALIVE_HOURS: ${{ inputs.keep_alive_hours }}
@@ -552,7 +634,9 @@ jobs:
             'D:\Ollama\server.log',
             'D:\Ollama\server-error.log',
             'D:\dashboard.log',
-            'D:\dashboard-error.log'
+            'D:\dashboard-error.log',
+            'D:\download-server.log',
+            'D:\download-server-error.log'
           )
           foreach ($file in $files) {
             if (Test-Path $file) { Copy-Item $file $diagnostics -Force }
