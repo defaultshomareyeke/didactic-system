@@ -1,4 +1,4 @@
-name: Windows Cloud RDP - Tailscale First + Ollama on D
+name: Windows Cloud RDP - All on D + Ollama Cache
 
 on:
   workflow_dispatch:
@@ -12,11 +12,13 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 360
+    env:
+      OLLAMA_MODELS: ${{ github.workspace }}\ollama_models   # models directory in workspace for caching
 
     steps:
 
       # ==========================================
-      # 0. CPU Optimization (no invalid powercfg)
+      # 0. CPU Optimization
       # ==========================================
       - name: 0. Free Runner Max Performance
         shell: powershell
@@ -25,47 +27,37 @@ jobs:
           Write-Host "FREE RUNNER MAX OPTIMIZATION"
           Write-Host "=========================================="
 
-          # Set High Performance power plan (valid GUID)
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          Write-Host "High Performance power plan activated."
 
-          # Disable Power Throttling
           $ptPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"
           if (-not (Test-Path $ptPath)) { New-Item -Path $ptPath -Force -ErrorAction SilentlyContinue | Out-Null }
           Set-ItemProperty -Path $ptPath -Name "PowerThrottlingOff" -Value 1 -Force -ErrorAction SilentlyContinue
 
-          # Disable Core Parking
           $coreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
           if (-not (Test-Path $coreParkingPath)) { New-Item -Path $coreParkingPath -Force -ErrorAction SilentlyContinue | Out-Null }
           Set-ItemProperty -Path $coreParkingPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $coreParkingPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
 
-          # CPU Min/Max 100%
           $procPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
           if (-not (Test-Path $procPath)) { New-Item -Path $procPath -Force -ErrorAction SilentlyContinue | Out-Null }
           Set-ItemProperty -Path $procPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $procPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
 
-          # Priority boost for current process
           $CurrentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
           if ($CurrentProcess) { $CurrentProcess.PriorityClass = "High" }
 
-          # Large system cache
           $LargePagesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
           Set-ItemProperty -Path $LargePagesPath -Name "LargeSystemCache" -Value 1 -Force -ErrorAction SilentlyContinue
 
-          # Disable unnecessary services
           $ServicesToStop = @("WSearch","Spooler","SysMain","DiagTrack","dmwappushservice","MapsBroker","lfsvc","PcaSvc","WMPNetworkSvc","XblAuthManager","XblGameSave","XboxNetApiSvc")
           foreach ($Service in $ServicesToStop) {
               Stop-Service -Name $Service -Force -ErrorAction SilentlyContinue
               Set-Service -Name $Service -StartupType Disabled -ErrorAction SilentlyContinue
           }
 
-          # Clear temp files
           Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
 
-          # Environment variables for max threads
           [System.Environment]::SetEnvironmentVariable("NUMBER_OF_PROCESSORS", [Environment]::ProcessorCount.ToString(), "Machine")
           [System.Environment]::SetEnvironmentVariable("OMP_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
           [System.Environment]::SetEnvironmentVariable("MKL_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
@@ -75,9 +67,8 @@ jobs:
           Write-Host "OPTIMIZATION COMPLETE"
           Write-Host "=========================================="
 
-
       # ==========================================
-      # 1. Install & Connect Tailscale (FIRST)
+      # 1. Install & Connect Tailscale
       # ==========================================
       - name: 1. Install & Connect Tailscale
         shell: powershell
@@ -93,16 +84,17 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
           Start-Sleep -Seconds 8
 
+          Remove-Item "C:\tailscale.msi" -Force -ErrorAction SilentlyContinue
+
           $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
           if (!(Test-Path $Tailscale)) { throw "Tailscale installation failed." }
 
           Write-Host "Connecting to Tailscale..."
-          & $Tailscale up --authkey="$Env:TAILSCALE_AUTHKEY" --hostname="github-rdp-ts-first"
+          & $Tailscale up --authkey="$Env:TAILSCALE_AUTHKEY" --hostname="github-rdp-all-d-cache"
           Start-Sleep -Seconds 10
 
           $ts_ip = & $Tailscale ip -4
           Write-Host "Tailscale IP : $ts_ip"
-
 
       # ==========================================
       # 2. Enable Remote Desktop & Create Admin Account
@@ -117,7 +109,6 @@ jobs:
 
           $ErrorActionPreference = "Stop"
           $Username = "iliya"
-          # Strong password NOT containing username
           $PasswordText = "Rdp!2024#Secure"
           $Password = ConvertTo-SecureString $PasswordText -AsPlainText -Force
 
@@ -129,69 +120,117 @@ jobs:
 
           Write-Host "RDP ready. Username: $Username / Password: $PasswordText / Port: 3389"
 
-
       # ==========================================
-      # 3. Install Other Software (Parallel) + Ollama on D:
+      # 3. Install All Software on D: (Python, VS Code, WinRAR, Ollama)
       # ==========================================
-      - name: 3. Install Python, VS Code, WinRAR & Ollama (Parallel, Ollama on D)
+      - name: 3. Install All Software on D: (Parallel)
         shell: powershell
         run: |
-          Write-Host "Starting parallel installations..."
+          Write-Host "Installing all software to D: drive..."
 
-          # Create D:\Ollama directory for installation and models
+          New-Item -ItemType Directory -Force -Path "D:\Python312" | Out-Null
+          New-Item -ItemType Directory -Force -Path "D:\VSCode" | Out-Null
+          New-Item -ItemType Directory -Force -Path "D:\WinRAR" | Out-Null
           New-Item -ItemType Directory -Force -Path "D:\Ollama" | Out-Null
-          New-Item -ItemType Directory -Force -Path "D:\ollama\models" | Out-Null
 
-          # Set environment variables (Machine level) so Ollama uses D:
-          [System.Environment]::SetEnvironmentVariable("OLLAMA_MODELS", "D:\ollama\models", "Machine")
+          # Create workspace models directory for caching
+          New-Item -ItemType Directory -Force -Path "$env:OLLAMA_MODELS" | Out-Null
+
+          # Set Ollama environment variables (install dir to D)
           [System.Environment]::SetEnvironmentVariable("OLLAMA_INSTALL_DIR", "D:\Ollama", "Machine")
+          # OLLAMA_MODELS already set at job level, but we also set machine-level for future sessions
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_MODELS", $env:OLLAMA_MODELS, "Machine")
 
-          # ---- Python ----
-          $pythonJob = Start-Job -ScriptBlock {
-              winget install --id Python.Python.3.12 --exact --silent `
-                --accept-package-agreements --accept-source-agreements
+          # ---- Python (Job) ----
+          $pyJob = Start-Job -ScriptBlock {
+              $installer = "$env:TEMP\python-installer.exe"
+              Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $installer
+              Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=0", "TargetDir=D:\Python312", "Include_pip=1", "Include_test=0", "PrependPath=1" -Wait
+              Remove-Item $installer -Force -ErrorAction SilentlyContinue
           }
 
-          # ---- VS Code ----
+          # ---- VS Code Portable (Job) ----
           $vscodeJob = Start-Job -ScriptBlock {
-              winget install --id Microsoft.VisualStudioCode --exact --silent `
-                --accept-package-agreements --accept-source-agreements
+              $zip = "$env:TEMP\vscode.zip"
+              Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $zip
+              Expand-Archive $zip -DestinationPath "D:\VSCode" -Force
+              Remove-Item $zip -Force -ErrorAction SilentlyContinue
           }
 
-          # ---- WinRAR ----
+          # ---- WinRAR (Job) ----
           $winrarJob = Start-Job -ScriptBlock {
-              winget install --id RARLab.WinRAR --exact --silent `
-                --accept-package-agreements --accept-source-agreements
+              $installer = "$env:TEMP\winrar.exe"
+              Invoke-WebRequest "https://www.rarlab.com/rar/winrar-x64-723.exe" -OutFile $installer
+              Start-Process $installer -ArgumentList "/S", "/D=D:\WinRAR" -Wait
+              Remove-Item $installer -Force -ErrorAction SilentlyContinue
           }
 
-          # ---- Ollama (background, install to D:\Ollama) ----
-          Start-Process powershell -ArgumentList '-NoProfile -WindowStyle Hidden -Command "& { 
-              $installer = \"$env:TEMP\OllamaSetup.exe\";
-              Invoke-WebRequest -Uri \"https://ollama.com/download/OllamaSetup.exe\" -OutFile $installer;
-              Start-Process -FilePath $installer -ArgumentList \"/silent\", \"/DIR=D:\Ollama\" -Wait
-          }"' -NoNewWindow
+          # ---- Ollama (Job using ZIP) ----
+          $ollamaJob = Start-Job -ScriptBlock {
+              $zip = "$env:TEMP\ollama.zip"
+              Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip
+              Expand-Archive $zip -DestinationPath "D:\Ollama" -Force
+              Remove-Item $zip -Force -ErrorAction SilentlyContinue
+          }
 
-          # Wait for foreground jobs
-          $jobs = @($pythonJob, $vscodeJob, $winrarJob)
-          $jobs | Wait-Job | Out-Null
+          # Wait for all jobs
+          $jobs = @($pyJob, $vscodeJob, $winrarJob, $ollamaJob)
+          $maxWaitSeconds = 1800
+          $deadline = (Get-Date).AddSeconds($maxWaitSeconds)
+          while ((Get-Date) -lt $deadline -and $jobs | Where-Object { $_.State -eq 'Running' }) {
+              Start-Sleep -Seconds 5
+          }
 
           foreach ($job in $jobs) {
               Write-Host "Job $($job.Id) State: $($job.State)"
               $out = $job | Receive-Job -ErrorAction SilentlyContinue
               if ($out) { Write-Host $out }
-              Remove-Job $job
+              Remove-Job $job -Force -ErrorAction SilentlyContinue
           }
 
-          # Refresh PATH
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          # Verify installations
+          $verification = @{
+              "Python" = "D:\Python312\python.exe"
+              "VS Code" = "D:\VSCode\Code.exe"
+              "WinRAR" = "D:\WinRAR\WinRAR.exe"
+              "Ollama" = "D:\Ollama\ollama.exe"
+          }
+          foreach ($name in $verification.Keys) {
+              $path = $verification[$name]
+              if (Test-Path $path) {
+                  Write-Host "$name : OK ($path)"
+              } else {
+                  Write-Host "$name : FAILED"
+              }
+          }
 
-          Write-Host "Core installations done. Ollama installing to D:\Ollama in background."
+          # Update PATH
+          $newPaths = @("D:\Python312", "D:\Python312\Scripts", "D:\VSCode", "D:\WinRAR", "D:\Ollama")
+          $userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+          foreach ($p in $newPaths) {
+              if ($userPath -notlike "*$p*") {
+                  $userPath = "$userPath;$p"
+              }
+          }
+          [System.Environment]::SetEnvironmentVariable("Path", $userPath, "User")
+          $env:Path += ";$userPath"
 
+          Write-Host "All software installations attempted on D: drive."
 
       # ==========================================
-      # 4. Download MoneyPrinter Projects (on D:)
+      # 4. Cache Ollama Models
       # ==========================================
-      - name: 4. Download MoneyPrinter Projects
+      - name: 4. Cache Ollama Models
+        id: cache-ollama
+        uses: actions/cache@v4
+        with:
+          path: ollama_models
+          key: ollama-${{ runner.os }}-${{ github.event.inputs.ollama_model }}
+
+      # ==========================================
+      # 5. Download MoneyPrinter Projects (on D:)
+      # ==========================================
+      - name: 5. Download MoneyPrinter Projects
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -209,11 +248,10 @@ jobs:
 
           Get-ChildItem $Base | Select-Object Name, FullName
 
-
       # ==========================================
-      # 5. Prepare Fonts & Vazirmatn
+      # 6. Prepare Fonts & Vazirmatn
       # ==========================================
-      - name: 5. Prepare Fonts & Vazirmatn
+      - name: 6. Prepare Fonts & Vazirmatn
         shell: powershell
         run: |
           $Base = "D:\MoneyPrinters"
@@ -229,17 +267,20 @@ jobs:
           Get-ChildItem $VazirRepo -Recurse -Include *.ttf,*.otf | ForEach-Object {
               Copy-Item $_.FullName $ProjectFonts -Force
           }
+          Remove-Item $VazirRepo -Recurse -Force -ErrorAction SilentlyContinue
           Write-Host "Vazirmatn installed."
 
-
       # ==========================================
-      # 6. Verify & Show System Info
+      # 7. Verify Projects & System Info
       # ==========================================
-      - name: 6. Verify Projects & System Info
+      - name: 7. Verify Projects & System Info
         shell: powershell
         run: |
           Write-Host "Projects on D:"
           Get-ChildItem "D:\MoneyPrinters" -Force | Select-Object Name, Mode
+
+          Write-Host "Software on D:"
+          Get-ChildItem "D:\" -Directory | Select-Object Name
 
           Write-Host "CPU:"
           Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed
@@ -247,32 +288,16 @@ jobs:
           Write-Host "Drives:"
           Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='Free(GB)';e={[math]::Round($_.Free/1GB,2)}}
 
-
       # ==========================================
-      # 7. Wait for Ollama (D:\Ollama) & Pull Model
+      # 8. Pull Ollama Model
       # ==========================================
-      - name: 7. Wait for Ollama & Pull Model
+      - name: 8. Pull Ollama Model
         shell: powershell
         env:
           OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
         run: |
-          $ollamaExe = $null
-          $candidates = @(
-              "D:\Ollama\ollama.exe",
-              "D:\Ollama\bin\ollama.exe",
-              "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe",
-              "$env:ProgramFiles\Ollama\ollama.exe"
-          )
-          $timeout = 600
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          while ($sw.Elapsed.TotalSeconds -lt $timeout -and $null -eq $ollamaExe) {
-              foreach ($p in $candidates) {
-                  if (Test-Path $p) { $ollamaExe = $p; break }
-              }
-              if ($null -eq $ollamaExe) { Start-Sleep -Seconds 5 }
-          }
-
-          if ($ollamaExe) {
+          $ollamaExe = "D:\Ollama\ollama.exe"
+          if (Test-Path $ollamaExe) {
               Write-Host "Ollama found at: $ollamaExe"
               & $ollamaExe --version
               if ($env:OLLAMA_MODEL -ne "") {
@@ -280,14 +305,14 @@ jobs:
                   & $ollamaExe pull $env:OLLAMA_MODEL
               }
           } else {
-              Write-Host "Ollama not detected within timeout."
+              Write-Host "Ollama executable not found at D:\Ollama\ollama.exe"
+              Write-Host "Skipping model pull."
           }
 
-
       # ==========================================
-      # 8. Keep Server Alive - 6 Hours
+      # 9. Keep Server Alive - 6 Hours
       # ==========================================
-      - name: 8. Keep Server Alive
+      - name: 9. Keep Server Alive
         shell: powershell
         run: |
           for ($i = 1; $i -le 360; $i++) {
