@@ -16,7 +16,7 @@ jobs:
     steps:
 
       # ==========================================
-      # 0. CPU Optimization
+      # 0. CPU Optimization (no invalid powercfg)
       # ==========================================
       - name: 0. Free Runner Max Performance
         shell: powershell
@@ -25,49 +25,47 @@ jobs:
           Write-Host "FREE RUNNER MAX OPTIMIZATION"
           Write-Host "=========================================="
 
-          $UltimatePlan = powercfg /list | Select-String "Ultimate Performance"
-          if ($UltimatePlan) {
-              $UltimateGUID = ($UltimatePlan -split '\s+')[3]
-              powercfg /setactive $UltimateGUID
-          } else {
-              $dupOutput = powercfg /duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
-              $dupGUID = ($dupOutput | Select-String "Power Scheme GUID").ToString().Split(':')[1].Trim()
-              if ($dupGUID) { powercfg /setactive $dupGUID }
-          }
+          # Set High Performance power plan (valid GUID)
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          Write-Host "High Performance power plan activated."
 
+          # Disable Power Throttling
           $ptPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"
           if (-not (Test-Path $ptPath)) { New-Item -Path $ptPath -Force -ErrorAction SilentlyContinue | Out-Null }
           Set-ItemProperty -Path $ptPath -Name "PowerThrottlingOff" -Value 1 -Force -ErrorAction SilentlyContinue
 
+          # Disable Core Parking
           $coreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
           if (-not (Test-Path $coreParkingPath)) { New-Item -Path $coreParkingPath -Force -ErrorAction SilentlyContinue | Out-Null }
           Set-ItemProperty -Path $coreParkingPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $coreParkingPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
 
+          # CPU Min/Max 100%
           $procPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
           if (-not (Test-Path $procPath)) { New-Item -Path $procPath -Force -ErrorAction SilentlyContinue | Out-Null }
           Set-ItemProperty -Path $procPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
           Set-ItemProperty -Path $procPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
 
-          powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100
-          powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX 100
-          powercfg /setactive scheme_current
-
+          # Priority boost for current process
           $CurrentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
           if ($CurrentProcess) { $CurrentProcess.PriorityClass = "High" }
 
+          # Large system cache
           $LargePagesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
           Set-ItemProperty -Path $LargePagesPath -Name "LargeSystemCache" -Value 1 -Force -ErrorAction SilentlyContinue
 
+          # Disable unnecessary services
           $ServicesToStop = @("WSearch","Spooler","SysMain","DiagTrack","dmwappushservice","MapsBroker","lfsvc","PcaSvc","WMPNetworkSvc","XblAuthManager","XblGameSave","XboxNetApiSvc")
           foreach ($Service in $ServicesToStop) {
               Stop-Service -Name $Service -Force -ErrorAction SilentlyContinue
               Set-Service -Name $Service -StartupType Disabled -ErrorAction SilentlyContinue
           }
 
+          # Clear temp files
           Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
 
+          # Environment variables for max threads
           [System.Environment]::SetEnvironmentVariable("NUMBER_OF_PROCESSORS", [Environment]::ProcessorCount.ToString(), "Machine")
           [System.Environment]::SetEnvironmentVariable("OMP_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
           [System.Environment]::SetEnvironmentVariable("MKL_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
@@ -119,7 +117,8 @@ jobs:
 
           $ErrorActionPreference = "Stop"
           $Username = "iliya"
-          $PasswordText = "123"
+          # Strong password meeting complexity requirements
+          $PasswordText = "Iliya@123"
           $Password = ConvertTo-SecureString $PasswordText -AsPlainText -Force
 
           $ExistingUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
