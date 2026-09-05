@@ -1,161 +1,152 @@
-name: Windows Cloud RDP - High Performance Runner
+name: Windows Cloud RDP - Free Tier Maxed
 
 on:
   workflow_dispatch:
     inputs:
-      runner_size:
-        description: 'Select runner size'
-        required: true
-        default: 'xlarge'
-        type: choice
-        options:
-          - 'large'
-          - 'xlarge'
-          - '2xlarge'
-          - '4xlarge'
       ollama_model:
-        description: 'Ollama model to pre-pull (leave empty to skip)'
+        description: 'Ollama model to pre-pull'
         required: false
         default: ''
 
 jobs:
   build:
-    # ==========================================
-    # FORCE LARGER RUNNER
-    # ==========================================
-    # Option 1: GitHub-hosted larger runners (paid plans)
-    # runs-on: windows-latest-16-core
-    # runs-on: windows-latest-32-core
-    # runs-on: windows-latest-64-core
-    #
-    # Option 2: Self-hosted with custom labels
-    # runs-on: [self-hosted, windows, x64, high-cpu]
-    #
-    # Option 3: Dynamic selection based on input
-    runs-on: ${{ github.event.inputs.runner_size == '4xlarge' && 'windows-latest-64-core' || github.event.inputs.runner_size == '2xlarge' && 'windows-latest-32-core' || github.event.inputs.runner_size == 'xlarge' && 'windows-latest-16-core' || 'windows-latest-8-core' }}
-    
+    runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
 
       # ==========================================
-      # 0. Force High-Performance CPU Mode
+      # 0. Max Out Free Runner Performance
       # ==========================================
-      - name: 0. Configure High-Performance CPU Mode
+      - name: 0. Free Runner Max Performance
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           Write-Host "=========================================="
-          Write-Host "CPU OPTIMIZATION & VERIFICATION"
+          Write-Host "FREE RUNNER MAX OPTIMIZATION"
           Write-Host "=========================================="
 
-          # Set power plan to High Performance
-          Write-Host "Setting High Performance power plan..."
-          
-          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          
-          # Alternative: Ultimate Performance plan
+          # Ultimate Performance Power Plan
           $UltimatePlan = powercfg /list | Select-String "Ultimate Performance"
           
           if ($UltimatePlan) {
               $UltimateGUID = ($UltimatePlan -split '\s+')[3]
               powercfg /setactive $UltimateGUID
-              Write-Host "Ultimate Performance power plan activated."
+              Write-Host "Ultimate Performance activated."
           } else {
-              # Create Ultimate Performance plan
               powercfg /duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
               powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61
-              Write-Host "Ultimate Performance power plan created and activated."
+              Write-Host "Ultimate Performance created and activated."
           }
 
-          # Disable CPU throttling
-          Write-Host ""
-          Write-Host "Disabling CPU throttling..."
-
+          # Disable Power Throttling
           Set-ItemProperty `
             -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" `
             -Name "PowerThrottlingOff" `
             -Value 1 `
             -Force
 
-          # Disable core parking
-          Write-Host "Disabling core parking..."
-
+          # Disable Core Parking
           $CoreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
 
-          Set-ItemProperty `
-            -Path $CoreParkingPath `
-            -Name "ValueMin" `
-            -Value 100 `
-            -Force
+          Set-ItemProperty -Path $CoreParkingPath -Name "ValueMin" -Value 100 -Force
+          Set-ItemProperty -Path $CoreParkingPath -Name "ValueMax" -Value 100 -Force
 
-          Set-ItemProperty `
-            -Path $CoreParkingPath `
-            -Name "ValueMax" `
-            -Value 100 `
-            -Force
-
-          # Set processor min/max to 100%
+          # CPU Min/Max 100%
           $ProcPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
 
-          Set-ItemProperty `
-            -Path $ProcPath `
-            -Name "ValueMin" `
-            -Value 100 `
-            -Force
+          Set-ItemProperty -Path $ProcPath -Name "ValueMin" -Value 100 -Force
+          Set-ItemProperty -Path $ProcPath -Name "ValueMax" -Value 100 -Force
 
-          Set-ItemProperty `
-            -Path $ProcPath `
-            -Name "ValueMax" `
-            -Value 100 `
-            -Force
-
-          # Apply changes
           powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100
           powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX 100
           powercfg /setactive scheme_current
 
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "CPU CONFIGURATION"
-          Write-Host "=========================================="
+          # Priority boost for current process
+          $CurrentProcess = Get-Process -Id $PID
+          $CurrentProcess.PriorityClass = "High"
 
-          # Show CPU details
-          $CPU = Get-CimInstance Win32_Processor
+          # Enable large pages (requires admin)
+          try {
+              $LargePagesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+              Set-ItemProperty -Path $LargePagesPath -Name "LargeSystemCache" -Value 1 -Force
+              Write-Host "Large system cache enabled."
+          } catch {
+              Write-Host "Large system cache skipped."
+          }
 
-          Write-Host "CPU Name: $($CPU.Name)"
-          Write-Host "Physical Cores: $($CPU.NumberOfCores)"
-          Write-Host "Logical Processors: $($CPU.NumberOfLogicalProcessors)"
-          Write-Host "Max Clock Speed: $($CPU.MaxClockSpeed) MHz"
-          Write-Host "Current Clock: $($CPU.CurrentClockSpeed) MHz"
-          Write-Host "L3 Cache: $([math]::Round($CPU.L3CacheSize / 1024, 1)) MB"
-          Write-Host "Socket: $($CPU.SocketDesignation)"
+          # Disable unnecessary services
+          $ServicesToStop = @(
+              "WSearch",
+              "Spooler",
+              "SysMain",
+              "DiagTrack",
+              "dmwappushservice",
+              "MapsBroker",
+              "lfsvc",
+              "PcaSvc",
+              "WMPNetworkSvc",
+              "XblAuthManager",
+              "XblGameSave",
+              "XboxNetApiSvc"
+          )
 
-          # Show memory channels
-          $Memory = Get-CimInstance Win32_PhysicalMemory
-          $TotalRAM = ($Memory | Measure-Object -Property Capacity -Sum).Sum / 1GB
-          $MemorySpeed = $Memory[0].Speed
-          $MemoryChannels = $Memory.Count
-
-          Write-Host ""
-          Write-Host "RAM: $([math]::Round($TotalRAM, 1)) GB"
-          Write-Host "Memory Speed: $MemorySpeed MHz"
-          Write-Host "Memory Modules: $MemoryChannels"
-
-          # CPU benchmark
-          Write-Host ""
-          Write-Host "Running quick CPU benchmark..."
-
-          $BenchmarkTime = Measure-Command {
-              $result = 0
-              for ($i = 0; $i -lt 10000000; $i++) {
-                  $result += $i
+          foreach ($Service in $ServicesToStop) {
+              try {
+                  Stop-Service -Name $Service -Force -ErrorAction Stop
+                  Set-Service -Name $Service -StartupType Disabled -ErrorAction Stop
+                  Write-Host "Disabled: $Service"
+              } catch {
+                  Write-Host "Skipped: $Service"
               }
           }
 
-          Write-Host "Benchmark completed in $($BenchmarkTime.TotalSeconds) seconds"
-          Write-Host "Score: $([math]::Round(10000000 / $BenchmarkTime.TotalSeconds, 0)) operations/second"
+          # Clear temp files
+          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+          # Set environment variables for max threads
+          [System.Environment]::SetEnvironmentVariable("NUMBER_OF_PROCESSORS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("OMP_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("MKL_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("OPENBLAS_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "HARDWARE INFO"
+          Write-Host "=========================================="
+
+          $CPU = Get-CimInstance Win32_Processor
+          Write-Host "CPU: $($CPU.Name)"
+          Write-Host "Cores: $($CPU.NumberOfCores)"
+          Write-Host "Threads: $($CPU.NumberOfLogicalProcessors)"
+          Write-Host "Max Clock: $($CPU.MaxClockSpeed) MHz"
+          Write-Host "L2 Cache: $([math]::Round($CPU.L2CacheSize / 1024, 1)) MB"
+          Write-Host "L3 Cache: $([math]::Round($CPU.L3CacheSize / 1024, 1)) MB"
+
+          $RAM = Get-CimInstance Win32_ComputerSystem
+          $Memory = Get-CimInstance Win32_PhysicalMemory
+          Write-Host ""
+          Write-Host "RAM: $([math]::Round($RAM.TotalPhysicalMemory / 1GB, 2)) GB"
+          Write-Host "Memory Speed: $($Memory[0].Speed) MHz"
+          Write-Host "Memory Modules: $($Memory.Count)"
+
+          Write-Host ""
+          Write-Host "CPU BENCHMARK:"
+          $BenchTime = Measure-Command {
+              $result = 0.0
+              for ($i = 1; $i -le 20000000; $i++) {
+                  $result += [math]::Sqrt($i)
+              }
+          }
+          Write-Host "20M sqrt operations: $($BenchTime.TotalSeconds) seconds"
+          Write-Host "Performance: $([math]::Round(20000000 / $BenchTime.TotalSeconds, 0)) ops/sec"
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "OPTIMIZATION COMPLETE"
+          Write-Host "=========================================="
 
 
       # ==========================================
@@ -190,21 +181,16 @@ jobs:
             [System.Environment]::GetEnvironmentVariable("Path","User")
 
           # ==========================================
-          # Install Ollama with CPU optimization
+          # Install Ollama - Optimized
           # ==========================================
           Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "Installing Ollama (CPU-Optimized)"
-          Write-Host "=========================================="
+          Write-Host "Installing Ollama..."
 
-          # Set Ollama to use all CPU cores
-          $env:OLLAMA_NUM_PARALLEL = [Environment]::ProcessorCount
-          $env:OLLAMA_MAX_LOADED_MODELS = 2
-          $env:OLLAMA_KEEP_ALIVE = "24h"
-
-          # Set Ollama thread count
+          # Set Ollama to use all cores
           [System.Environment]::SetEnvironmentVariable("OLLAMA_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
           [System.Environment]::SetEnvironmentVariable("OLLAMA_NUM_PARALLEL", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_MAX_LOADED_MODELS", "1", "Machine")
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", "24h", "Machine")
 
           $OllamaInstaller = "$env:TEMP\OllamaSetup.exe"
 
@@ -254,17 +240,11 @@ jobs:
               throw "Ollama installation failed."
           }
 
-          Write-Host "Ollama installed successfully."
-          Write-Host "Ollama path: $Ollama"
-          Write-Host "CPU Threads: $([Environment]::ProcessorCount)"
-
+          Write-Host "Ollama installed."
           & $Ollama --version
 
-          # ==========================================
-          # Pre-pull Ollama model if specified
-          # ==========================================
+          # Pre-pull model if specified
           if ($env:OLLAMA_MODEL -ne "") {
-              Write-Host ""
               Write-Host "Pulling model: $env:OLLAMA_MODEL"
               & $Ollama pull $env:OLLAMA_MODEL
           }
@@ -273,9 +253,7 @@ jobs:
           # Download MoneyPrinterTurbo Keys
           # ==========================================
           Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "Downloading MoneyPrinterTurbo Keys"
-          Write-Host "=========================================="
+          Write-Host "Downloading MoneyPrinterTurbo Keys..."
 
           $Downloads = Join-Path $env:USERPROFILE "Downloads"
 
@@ -291,11 +269,7 @@ jobs:
             -Uri $KeysUrl `
             -OutFile $KeysPath
 
-          if (!(Test-Path $KeysPath)) {
-              throw "moneyprinterturbo-keys.json download failed."
-          }
-
-          Write-Host "Keys downloaded successfully."
+          Write-Host "Keys downloaded."
         env:
           OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
 
@@ -324,13 +298,6 @@ jobs:
             -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
             -Name "bEnumerateHWBeforeTS" `
             -Value 1 `
-            -Force
-
-          # Set RDP to use all available CPU cores
-          Set-ItemProperty `
-            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
-            -Name "NUMBER_OF_PROCESSORS" `
-            -Value [Environment]::ProcessorCount `
             -Force
 
           Write-Host "Remote Desktop enabled."
@@ -380,7 +347,7 @@ jobs:
           Write-Host "Username : $Username"
           Write-Host "Password : $PasswordText"
           Write-Host "Port     : 3389"
-          Write-Host "CPU Cores: $([Environment]::ProcessorCount)"
+          Write-Host "Cores    : $([Environment]::ProcessorCount)"
           Write-Host "=========================================="
 
 
@@ -419,7 +386,7 @@ jobs:
 
           & $Tailscale up `
             --authkey="$Env:TAILSCALE_AUTHKEY" `
-            --hostname="github-rdp-hpc-server"
+            --hostname="github-rdp-max"
 
           Start-Sleep -Seconds 10
 
@@ -427,13 +394,12 @@ jobs:
 
           Write-Host ""
           Write-Host "=================================================="
-          Write-Host "        HIGH PERFORMANCE RDP SERVER READY"
+          Write-Host "         RDP SERVER READY (MAX OPTIMIZED)"
           Write-Host "=================================================="
           Write-Host "Tailscale IP : $ts_ip"
           Write-Host "Username     : iliya"
           Write-Host "Password     : 123"
           Write-Host "Port         : 3389"
-          Write-Host "CPU Cores    : $([Environment]::ProcessorCount)"
           Write-Host "=================================================="
 
 
@@ -477,9 +443,7 @@ jobs:
             "$Base\MoneyPrinterTurbo"
 
           Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "All projects downloaded"
-          Write-Host "=========================================="
+          Write-Host "All projects downloaded."
 
           Get-ChildItem $Base |
             Select-Object Name, FullName
@@ -562,7 +526,7 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "Vazirmatn installation complete"
+          Write-Host "Vazirmatn installation complete."
 
           Get-ChildItem `
             $ProjectFonts `
@@ -631,6 +595,7 @@ jobs:
               NumberOfCores,
               NumberOfLogicalProcessors,
               MaxClockSpeed,
+              L2CacheSize,
               L3CacheSize
 
           Write-Host ""
@@ -654,19 +619,6 @@ jobs:
           Write-Host "Free:"
           Write-Host "$([math]::Round($Drive.Free / 1GB, 2)) GB"
 
-          Write-Host ""
-          Write-Host "========== CPU BENCHMARK =========="
-
-          $BenchmarkTime = Measure-Command {
-              $result = 0
-              for ($i = 0; $i -lt 50000000; $i++) {
-                  $result += $i
-              }
-          }
-
-          Write-Host "50M operations completed in $($BenchmarkTime.TotalSeconds) seconds"
-          Write-Host "Performance: $([math]::Round(50000000 / $BenchmarkTime.TotalSeconds, 0)) ops/sec"
-
 
       # ==========================================
       # 10. Keep Server Alive - 6 Hours
@@ -688,5 +640,5 @@ jobs:
 
               $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
 
-              Write-Host "[$i/360] HPC Server running | CPU: $cpuLoad% | C: Free = $freeGB GB"
+              Write-Host "[$i/360] Server running | CPU: $cpuLoad% | C: Free = $freeGB GB"
           }
