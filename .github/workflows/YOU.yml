@@ -130,6 +130,7 @@ jobs:
 
           $ts_ip = & $Tailscale ip -4
           Write-Host "Tailscale IP : $ts_ip"
+          & $Tailscale status | Out-File "C:\tailscale-connection.log" -Encoding utf8
 
           $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
           @("full address:s:$($ts_ip.Trim()):3389", "username:s:iliya", "prompt for credentials:i:1", "screen mode id:i:2") |
@@ -196,6 +197,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+          Start-Transcript -Path "D:\install.log" -Force | Out-Null
           Write-Host "Installing selected software to D: drive..."
           New-Item -ItemType Directory -Force -Path "C:\actions-cache\installers" | Out-Null
 
@@ -216,7 +218,6 @@ jobs:
               $installer = "C:\actions-cache\installers\python-installer.exe"
               if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $installer }
               Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=1", "TargetDir=D:\Python312", "Include_pip=1", "Include_test=0", "PrependPath=1" -Wait
-              Remove-Item $installer -Force -ErrorAction SilentlyContinue
           }
 
           $jobs += $pyJob
@@ -229,7 +230,6 @@ jobs:
                   $zip = "C:\actions-cache\installers\vscode.zip"
                   if (!(Test-Path $zip)) { Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $zip }
                   Expand-Archive $zip -DestinationPath "D:\VSCode" -Force
-                  Remove-Item $zip -Force -ErrorAction SilentlyContinue
               }
           }
 
@@ -241,8 +241,11 @@ jobs:
               $ProgressPreference = "SilentlyContinue"
               $installer = "C:\actions-cache\installers\winrar.exe"
               if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.rarlab.com/rar/winrar-x64-723.exe" -OutFile $installer }
-              Start-Process $installer -ArgumentList "/S", "/D=D:\WinRAR" -Wait
-              Remove-Item $installer -Force -ErrorAction SilentlyContinue
+              $process = Start-Process $installer -ArgumentList '/S /D=D:\WinRAR' -PassThru
+              if (!$process.WaitForExit(180000)) {
+                  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                  Write-Warning "WinRAR installation timed out and was skipped."
+              }
           }
 
           $jobs += $winrarJob
@@ -254,7 +257,6 @@ jobs:
                   $zip = "C:\actions-cache\installers\ollama.zip"
                   if (!(Test-Path $zip)) { Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip }
                   Expand-Archive $zip -DestinationPath "D:\Ollama" -Force
-                  Remove-Item $zip -Force -ErrorAction SilentlyContinue
               }
           }
 
@@ -286,6 +288,7 @@ jobs:
               if (-not $enabled[$name]) { Write-Host "$name : SKIPPED"; continue }
               $path = $verification[$name]
               if (Test-Path $path) { Write-Host "$name : OK ($path)" }
+              elseif ($name -eq "WinRAR") { Write-Warning "WinRAR was not installed; the workflow will continue." }
               else { throw "$name installation failed: $path is missing." }
           }
 
@@ -301,6 +304,7 @@ jobs:
           $newPaths | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
           Write-Host "All software installations attempted on D: drive."
+          Stop-Transcript | Out-Null
 
       - name: '3c. Save extracted VS Code and Ollama'
         if: ${{ steps.cache-extracted.outputs.cache-hit != 'true' }}
@@ -511,16 +515,29 @@ jobs:
               if ($i -eq 1) { Add-Content $env:GITHUB_STEP_SUMMARY "`n### Health monitor`n| Time | CPU | RAM | D free | Tailscale | Ollama |`n|---|---:|---:|---:|---|---|" }
               Add-Content $env:GITHUB_STEP_SUMMARY $line
           }
-      - name: '10. Upload diagnostic logs'
+      - name: '10. Collect diagnostic logs'
+        if: always()
+        shell: powershell
+        run: |
+          $diagnostics = Join-Path $env:GITHUB_WORKSPACE 'diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnostics | Out-Null
+          $files = @(
+            'C:\tailscale-connection.log',
+            'D:\install.log',
+            'D:\Ollama\server.log',
+            'D:\Ollama\server-error.log',
+            'D:\dashboard.log',
+            'D:\dashboard-error.log'
+          )
+          foreach ($file in $files) {
+            if (Test-Path $file) { Copy-Item $file $diagnostics -Force }
+          }
+
+      - name: '10b. Upload diagnostic logs'
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rdp-diagnostics-${{ github.run_number }}
-          path: |
-            D:\Ollama\*.log
-            D:\dashboard*.log
-            C:\actions-cache\installers\*
-            C:\tailscale-connection.log
-            D:\MoneyPrinters\**\*.log
+          path: diagnostics
           if-no-files-found: ignore
           retention-days: 7
