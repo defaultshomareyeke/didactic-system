@@ -132,14 +132,14 @@ jobs:
           Write-Host "Tailscale IP : $ts_ip"
 
           $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
-          $rdp = New-Object -ComObject WScript.Shell
-          $shortcut = $rdp.CreateShortcut((Join-Path $desktop 'RDP-Connection.rdp'))
-          $shortcut.TargetPath = "mstsc.exe"
-          $shortcut.Arguments = "/v:$($ts_ip.Trim()):3389"
-          $shortcut.WorkingDirectory = $desktop
-          $shortcut.Save()
           @("full address:s:$($ts_ip.Trim()):3389", "username:s:iliya", "prompt for credentials:i:1", "screen mode id:i:2") |
             Set-Content (Join-Path $desktop 'RDP-Connection.rdp')
+          $rdp = New-Object -ComObject WScript.Shell
+          $shortcut = $rdp.CreateShortcut((Join-Path $desktop 'RDP-Connection.lnk'))
+          $shortcut.TargetPath = "mstsc.exe"
+          $shortcut.Arguments = (Join-Path $desktop 'RDP-Connection.rdp')
+          $shortcut.WorkingDirectory = $desktop
+          $shortcut.Save()
 
       - name: '2. Enable Remote Desktop & Create Admin Account'
         shell: powershell
