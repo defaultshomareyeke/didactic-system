@@ -112,6 +112,12 @@ jobs:
           Write-Host "OPTIMIZATION COMPLETE"
           Write-Host "=========================================="
 
+      - name: '1a. Cache Tailscale installer'
+        uses: actions/cache@v4
+        with:
+          path: C:\actions-cache\tailscale\tailscale.msi
+          key: tailscale-installer-${{ runner.os }}-stable-v1
+
       - name: '1. Install & Connect Tailscale'
         shell: powershell
         env:
@@ -119,14 +125,20 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Downloading Tailscale..."
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "C:\tailscale.msi"
+          $tailscaleCache = "C:\actions-cache\tailscale"
+          $tailscaleInstaller = Join-Path $tailscaleCache "tailscale.msi"
+          New-Item -ItemType Directory -Force -Path $tailscaleCache | Out-Null
+          if (!(Test-Path $tailscaleInstaller)) {
+              Write-Host "Downloading Tailscale installer..."
+              Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $tailscaleInstaller
+          } else {
+              Write-Host "Using cached Tailscale installer."
+          }
 
           Write-Host "Installing Tailscale..."
-          Start-Process msiexec.exe -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
+          $tailscaleInstall = Start-Process msiexec.exe -ArgumentList "/i `"$tailscaleInstaller`" /quiet /norestart" -Wait -PassThru
+          if ($tailscaleInstall.ExitCode -notin @(0, 3010)) { throw "Tailscale installer failed with exit code $($tailscaleInstall.ExitCode)." }
           Start-Sleep -Seconds 8
-
-          Remove-Item "C:\tailscale.msi" -Force -ErrorAction SilentlyContinue
 
           $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
           if (!(Test-Path $Tailscale)) { throw "Tailscale installation failed." }
@@ -557,9 +569,13 @@ jobs:
           $python = "C:\Program Files\Python312\python.exe"
           if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
           if (!$python) { throw "Python is required to serve the dashboard." }
-          $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','0.0.0.0','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
+          $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
           Start-Sleep -Seconds 2
           if ($dashboard.HasExited) { throw "Dashboard web server failed to start." }
+          $null = Invoke-WebRequest "http://127.0.0.1:$port/RDP-STATUS.html" -UseBasicParsing -TimeoutSec 5
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          & $tailscale serve --bg --tcp=$port "tcp://127.0.0.1:$port"
+          if ($LASTEXITCODE -ne 0) { throw "Tailscale Serve failed for dashboard port $port." }
           $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
           $url = "http://$ip`:$port/RDP-STATUS.html"
           Write-Host "Dashboard URL: $url"
@@ -582,9 +598,13 @@ jobs:
           if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
           if (!$python) { throw "Python is required to start the download server." }
 
-          $downloadServer = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','0.0.0.0','--directory',$downloadDirectory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\download-server.log" -RedirectStandardError "D:\download-server-error.log"
+          $downloadServer = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$downloadDirectory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\download-server.log" -RedirectStandardError "D:\download-server-error.log"
           Start-Sleep -Seconds 2
           if ($downloadServer.HasExited) { throw "Browser download server failed to start." }
+          $null = Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 5
+          $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+          & $tailscale serve --bg --tcp=$port "tcp://127.0.0.1:$port"
+          if ($LASTEXITCODE -ne 0) { throw "Tailscale Serve failed for download port $port." }
 
           $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
           $downloadUrl = "http://$ip`:$port/"
