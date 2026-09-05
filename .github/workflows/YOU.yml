@@ -131,6 +131,16 @@ jobs:
           $ts_ip = & $Tailscale ip -4
           Write-Host "Tailscale IP : $ts_ip"
 
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $rdp = New-Object -ComObject WScript.Shell
+          $shortcut = $rdp.CreateShortcut((Join-Path $desktop 'RDP-Connection.rdp'))
+          $shortcut.TargetPath = "mstsc.exe"
+          $shortcut.Arguments = "/v:$($ts_ip.Trim()):3389"
+          $shortcut.WorkingDirectory = $desktop
+          $shortcut.Save()
+          @("full address:s:$($ts_ip.Trim()):3389", "username:s:iliya", "prompt for credentials:i:1", "screen mode id:i:2") |
+            Set-Content (Join-Path $desktop 'RDP-Connection.rdp')
+
       - name: '2. Enable Remote Desktop & Create Admin Account'
         shell: powershell
         run: |
@@ -158,6 +168,15 @@ jobs:
         with:
           path: C:\actions-cache\installers
           key: installers-${{ runner.os }}-python312-vscode-winrar-ollama
+
+      - name: '3b. Restore extracted VS Code and Ollama'
+        id: cache-extracted
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            D:\VSCode
+            D:\Ollama
+          key: extracted-${{ runner.os }}-vscode-ollama-v1
 
       - name: '3. Install Selected Software on D: (Parallel)'
         env:
@@ -196,10 +215,12 @@ jobs:
           $vscodeJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
-              $zip = "C:\actions-cache\installers\vscode.zip"
-              if (!(Test-Path $zip)) { Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $zip }
-              Expand-Archive $zip -DestinationPath "D:\VSCode" -Force
-              Remove-Item $zip -Force -ErrorAction SilentlyContinue
+              if (!(Test-Path "D:\VSCode\Code.exe")) {
+                  $zip = "C:\actions-cache\installers\vscode.zip"
+                  if (!(Test-Path $zip)) { Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $zip }
+                  Expand-Archive $zip -DestinationPath "D:\VSCode" -Force
+                  Remove-Item $zip -Force -ErrorAction SilentlyContinue
+              }
           }
 
           $jobs += $vscodeJob
@@ -219,10 +240,12 @@ jobs:
           $ollamaJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
-              $zip = "C:\actions-cache\installers\ollama.zip"
-              if (!(Test-Path $zip)) { Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip }
-              Expand-Archive $zip -DestinationPath "D:\Ollama" -Force
-              Remove-Item $zip -Force -ErrorAction SilentlyContinue
+              if (!(Test-Path "D:\Ollama\ollama.exe")) {
+                  $zip = "C:\actions-cache\installers\ollama.zip"
+                  if (!(Test-Path $zip)) { Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip }
+                  Expand-Archive $zip -DestinationPath "D:\Ollama" -Force
+                  Remove-Item $zip -Force -ErrorAction SilentlyContinue
+              }
           }
 
           $jobs += $ollamaJob
@@ -269,6 +292,15 @@ jobs:
 
           Write-Host "All software installations attempted on D: drive."
 
+      - name: '3c. Save extracted VS Code and Ollama'
+        if: ${{ steps.cache-extracted.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            D:\VSCode
+            D:\Ollama
+          key: extracted-${{ runner.os }}-vscode-ollama-v1
+
       - name: '4. Cache Ollama Models'
         id: cache-ollama
         if: ${{ inputs.ollama_model != '' }}
@@ -285,17 +317,18 @@ jobs:
           $Base = "D:\MoneyPrinters"
           New-Item -ItemType Directory -Force -Path $Base | Out-Null
 
-          Write-Host "Downloading MoneyPrinter..."
-          git clone --depth 1 https://github.com/FujiwaraChoki/MoneyPrinter.git "$Base\MoneyPrinter"
-          if ($LASTEXITCODE -ne 0) { throw "Git clone failed. See the preceding error." }
-
-          Write-Host "Downloading MoneyPrinterV2..."
-          git clone --depth 1 https://github.com/FujiwaraChoki/MoneyPrinterV2.git "$Base\MoneyPrinterV2"
-          if ($LASTEXITCODE -ne 0) { throw "Git clone failed. See the preceding error." }
-
-          Write-Host "Downloading MoneyPrinterTurbo..."
-          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git "$Base\MoneyPrinterTurbo"
-          if ($LASTEXITCODE -ne 0) { throw "Git clone failed. See the preceding error." }
+          $cloneJobs = @(
+            (Start-Job -ScriptBlock { git clone --depth 1 --no-tags --filter=blob:none https://github.com/FujiwaraChoki/MoneyPrinter.git "D:\MoneyPrinters\MoneyPrinter" }),
+            (Start-Job -ScriptBlock { git clone --depth 1 --no-tags --filter=blob:none https://github.com/FujiwaraChoki/MoneyPrinterV2.git "D:\MoneyPrinters\MoneyPrinterV2" }),
+            (Start-Job -ScriptBlock { git clone --depth 1 --no-tags --filter=blob:none https://github.com/harry0703/MoneyPrinterTurbo.git "D:\MoneyPrinters\MoneyPrinterTurbo" })
+          )
+          $deadline = (Get-Date).AddMinutes(20)
+          while ((Get-Date) -lt $deadline -and @($cloneJobs | Where-Object State -in @('Running','NotStarted')).Count) { Start-Sleep 3 }
+          foreach ($job in $cloneJobs) {
+            if ($job.State -ne 'Completed') { Stop-Job $job; throw "A MoneyPrinter clone failed or timed out." }
+            Receive-Job $job -ErrorAction Stop
+            Remove-Job $job -Force
+          }
 
           Get-ChildItem $Base | Select-Object Name, FullName
 
@@ -310,14 +343,18 @@ jobs:
               New-Item -ItemType Directory -Force -Path $Fonts | Out-Null
           }
 
-          $ProjectFonts = "$Base\MoneyPrinterV2\fonts"
-          $VazirRepo = "D:\vazirmatn"
-          git clone --depth 1 https://github.com/rastikerdar/vazirmatn.git $VazirRepo
-          if ($LASTEXITCODE -ne 0) { throw "Git clone failed. See the preceding error." }
-          Get-ChildItem $VazirRepo -Recurse -Include *.ttf,*.otf | ForEach-Object {
-              Copy-Item $_.FullName $ProjectFonts -Force
+          $fontJobs = foreach ($Project in $Projects) {
+              Start-Job -ArgumentList $Project -ScriptBlock {
+                  param($Target)
+                  $tmp = Join-Path $env:TEMP ("vazirmatn-" + [guid]::NewGuid())
+                  git clone --depth 1 --no-tags --filter=blob:none https://github.com/rastikerdar/vazirmatn.git $tmp
+                  if ($LASTEXITCODE -ne 0) { throw "Vazirmatn download failed." }
+                  Get-ChildItem $tmp -Recurse -Include *.ttf,*.otf | ForEach-Object { Copy-Item $_.FullName (Join-Path $Target 'fonts') -Force }
+                  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+              }
           }
-          Remove-Item $VazirRepo -Recurse -Force -ErrorAction SilentlyContinue
+          Wait-Job $fontJobs -Timeout 900 | Out-Null
+          foreach ($job in $fontJobs) { Receive-Job $job -ErrorAction Stop; Remove-Job $job -Force }
           Write-Host "Vazirmatn installed."
 
       - name: '7. Create Desktop Shortcuts'
