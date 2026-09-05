@@ -33,6 +33,19 @@ on:
         required: false
         type: boolean
         default: true
+      keep_alive_hours:
+        description: 'How many hours to keep the RDP runner alive'
+        required: false
+        type: choice
+        options:
+          - '1'
+          - '3'
+          - '6'
+        default: '3'
+      dashboard_port:
+        description: 'Port for the remote status dashboard'
+        required: false
+        default: '8080'
 
 jobs:
   build:
@@ -140,6 +153,12 @@ jobs:
 
           Write-Host "RDP ready. Username: $Username / Password: $PasswordText / Port: 3389"
 
+      - name: '3. Cache installers'
+        uses: actions/cache@v4
+        with:
+          path: C:\actions-cache\installers
+          key: installers-${{ runner.os }}-python312-vscode-winrar-ollama
+
       - name: '3. Install Selected Software on D: (Parallel)'
         env:
           INSTALL_PYTHON: ${{ inputs.install_python }}
@@ -148,7 +167,8 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          Write-Host "Installing all software to D: drive..."
+          Write-Host "Installing selected software to D: drive..."
+          New-Item -ItemType Directory -Force -Path "C:\actions-cache\installers" | Out-Null
 
           New-Item -ItemType Directory -Force -Path "D:\Python312" | Out-Null
           New-Item -ItemType Directory -Force -Path "D:\VSCode" | Out-Null
@@ -164,8 +184,8 @@ jobs:
           $pyJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
-              $installer = "$env:TEMP\python-installer.exe"
-              Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $installer
+              $installer = "C:\actions-cache\installers\python-installer.exe"
+              if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $installer }
               Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=1", "TargetDir=D:\Python312", "Include_pip=1", "Include_test=0", "PrependPath=1" -Wait
               Remove-Item $installer -Force -ErrorAction SilentlyContinue
           }
@@ -176,8 +196,8 @@ jobs:
           $vscodeJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
-              $zip = "$env:TEMP\vscode.zip"
-              Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $zip
+              $zip = "C:\actions-cache\installers\vscode.zip"
+              if (!(Test-Path $zip)) { Invoke-WebRequest "https://update.code.visualstudio.com/latest/win32-x64-archive/stable" -OutFile $zip }
               Expand-Archive $zip -DestinationPath "D:\VSCode" -Force
               Remove-Item $zip -Force -ErrorAction SilentlyContinue
           }
@@ -188,8 +208,8 @@ jobs:
           $winrarJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
-              $installer = "$env:TEMP\winrar.exe"
-              Invoke-WebRequest "https://www.rarlab.com/rar/winrar-x64-723.exe" -OutFile $installer
+              $installer = "C:\actions-cache\installers\winrar.exe"
+              if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.rarlab.com/rar/winrar-x64-723.exe" -OutFile $installer }
               Start-Process $installer -ArgumentList "/S", "/D=D:\WinRAR" -Wait
               Remove-Item $installer -Force -ErrorAction SilentlyContinue
           }
@@ -199,8 +219,8 @@ jobs:
           $ollamaJob = Start-Job -ScriptBlock {
               $ErrorActionPreference = "Stop"
               $ProgressPreference = "SilentlyContinue"
-              $zip = "$env:TEMP\ollama.zip"
-              Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip
+              $zip = "C:\actions-cache\installers\ollama.zip"
+              if (!(Test-Path $zip)) { Invoke-WebRequest "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip" -OutFile $zip }
               Expand-Archive $zip -DestinationPath "D:\Ollama" -Force
               Remove-Item $zip -Force -ErrorAction SilentlyContinue
           }
@@ -367,10 +387,66 @@ jobs:
           path: ${{ env.OLLAMA_MODELS }}
           key: ${{ steps.cache-ollama.outputs.cache-primary-key }}
 
+      - name: '9. Create Desktop Status & Dashboard'
+        shell: powershell
+        env:
+          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+          KEEP_ALIVE_HOURS: ${{ inputs.keep_alive_hours }}
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
+          $shutdown = (Get-Date).AddHours([double]$env:KEEP_ALIVE_HOURS)
+          $dashboardPort = [int]$env:DASHBOARD_PORT
+          $free = Get-PSDrive D | Select-Object -ExpandProperty Free
+          $freeGB = [math]::Round($free / 1GB, 2)
+          $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
+          $os = Get-CimInstance Win32_OperatingSystem
+          $ramUsed = [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100, 1)
+          @"
+          RDP STATUS
+          ==========
+          IP: $ip
+          Port: 3389
+          Username: iliya
+          Ollama model: $env:OLLAMA_MODEL
+          D free: $freeGB GB
+          Scheduled shutdown: $($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))
+          Updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+          "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.txt')
+          @"
+          <!doctype html><html><head><meta charset='utf-8'><title>RDP Status</title><meta http-equiv='refresh' content='60'><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}</style></head><body><h1>RDP Runner Status</h1><table>
+          <tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama model</td><td>$env:OLLAMA_MODEL</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
+          "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.html')
+
+      - name: '9. Serve Dashboard on Network'
+        shell: powershell
+        env:
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $port = [int]$env:DASHBOARD_PORT
+          if ($port -lt 1024 -or $port -gt 65535) { throw "Dashboard port must be between 1024 and 65535." }
+          New-NetFirewallRule -DisplayName "RDP Status Dashboard $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          $python = "D:\Python312\python.exe"
+          if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw "Python is required to serve the dashboard." }
+          $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','0.0.0.0','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
+          Start-Sleep -Seconds 2
+          if ($dashboard.HasExited) { throw "Dashboard web server failed to start." }
+          $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
+          $url = "http://$ip`:$port/RDP-STATUS.html"
+          Write-Host "Dashboard URL: $url"
+          "### Remote dashboard`n[$url]($url)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nDashboard URL: $url"
+
       - name: '9. Keep Server Alive'
+        env:
+          KEEP_ALIVE_HOURS: ${{ inputs.keep_alive_hours }}
         shell: powershell
         run: |
-          for ($i = 1; $i -le 360; $i++) {
+          $iterations = [int]$env:KEEP_ALIVE_HOURS * 60
+          for ($i = 1; $i -le $iterations; $i++) {
               Start-Sleep -Seconds 60
               $free = Get-PSDrive D -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Free
               if (-not $free) { $free = 0 }
@@ -382,7 +458,22 @@ jobs:
               $ollamaOk = $false
               try { $null = Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 2; $ollamaOk = $true } catch {}
               $line = "| $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $cpuLoad% | $ramUsed% | $freeGB GB | $tsOk | $ollamaOk |"
-              Write-Host "[$i/360] Server running | CPU: $cpuLoad% | RAM: $ramUsed% | D: Free = $freeGB GB | Tailscale=$tsOk | Ollama=$ollamaOk"
+              $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+              if (Test-Path (Join-Path $desktop 'RDP-STATUS.txt')) { Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nUpdated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | CPU: $cpuLoad% | RAM: $ramUsed% | Ollama: $ollamaOk" }
+              Write-Host "[$i/$iterations] Server running | CPU: $cpuLoad% | RAM: $ramUsed% | D: Free = $freeGB GB | Tailscale=$tsOk | Ollama=$ollamaOk"
               if ($i -eq 1) { Add-Content $env:GITHUB_STEP_SUMMARY "`n### Health monitor`n| Time | CPU | RAM | D free | Tailscale | Ollama |`n|---|---:|---:|---:|---|---|" }
               Add-Content $env:GITHUB_STEP_SUMMARY $line
           }
+      - name: '10. Upload diagnostic logs'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-diagnostics-${{ github.run_number }}
+          path: |
+            D:\Ollama\*.log
+            D:\dashboard*.log
+            C:\actions-cache\installers\*
+            C:\tailscale-connection.log
+            D:\MoneyPrinters\**\*.log
+          if-no-files-found: ignore
+          retention-days: 7
