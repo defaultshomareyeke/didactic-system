@@ -117,8 +117,8 @@ jobs:
 
           $ErrorActionPreference = "Stop"
           $Username = "iliya"
-          # Strong password meeting complexity requirements
-          $PasswordText = "Iliya@123"
+          # Strong password NOT containing username
+          $PasswordText = "Rdp!2024#Secure"
           $Password = ConvertTo-SecureString $PasswordText -AsPlainText -Force
 
           $ExistingUser = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
