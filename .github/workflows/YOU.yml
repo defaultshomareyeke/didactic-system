@@ -212,7 +212,8 @@ jobs:
               $ProgressPreference = "SilentlyContinue"
               $installer = "C:\actions-cache\installers\python-installer.exe"
               if (!(Test-Path $installer)) { Invoke-WebRequest "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" -OutFile $installer }
-              Start-Process $installer -ArgumentList "/quiet", "InstallAllUsers=1", "Include_pip=1", "Include_test=0", "PrependPath=1" -Wait
+              $pythonInstall = Start-Process $installer -ArgumentList '/quiet', 'InstallAllUsers=1', 'TargetDir="C:\Program Files\Python312"', 'Include_pip=1', 'Include_test=0', 'PrependPath=1', 'Shortcuts=0' -Wait -PassThru
+              if ($pythonInstall.ExitCode -notin @(0, 3010)) { throw "Python installer failed with exit code $($pythonInstall.ExitCode)." }
           }
 
           $jobs += $pyJob
@@ -277,9 +278,12 @@ jobs:
                   "C:\Program Files\Python312\python.exe",
                   "C:\Program Files\Python313\python.exe",
                   "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-                  "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe"
+                  "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+                  (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+                  (Get-ChildItem "C:\hostedtoolcache\windows\Python\*\x64\python.exe" -ErrorAction SilentlyContinue |
+                      Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName -First 1)
               )
-              $pythonExe = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+              $pythonExe = $pythonCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
               if (!$pythonExe) {
                   $pythonExe = Get-ChildItem "C:\Program Files\Python*\python.exe" -ErrorAction SilentlyContinue |
                       Select-Object -ExpandProperty FullName -First 1
@@ -318,8 +322,12 @@ jobs:
           $newPaths | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           if ($pythonExe) {
               & $pythonExe --version
+              & $pythonExe -m ensurepip --upgrade
+              if ($LASTEXITCODE -ne 0) { throw "Python ensurepip failed." }
+              & $pythonExe -m pip install --upgrade pip --disable-pip-version-check
+              if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
               & $pythonExe -m pip --version
-              Write-Host "Python and Scripts added to the machine PATH."
+              Write-Host "pip upgraded; Python and Scripts added to the Windows machine PATH."
           }
 
           Write-Host "All selected software installations completed."
