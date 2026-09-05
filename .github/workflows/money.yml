@@ -16,13 +16,11 @@ jobs:
     steps:
 
       # ==========================================
-      # 0. Max Out Free Runner Performance
+      # 0. Max Out Free Runner Performance (No try/catch)
       # ==========================================
       - name: 0. Free Runner Max Performance
         shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-
           Write-Host "=========================================="
           Write-Host "FREE RUNNER MAX OPTIMIZATION"
           Write-Host "=========================================="
@@ -33,50 +31,62 @@ jobs:
           if ($UltimatePlan) {
               $UltimateGUID = ($UltimatePlan -split '\s+')[3]
               powercfg /setactive $UltimateGUID
-              Write-Host "Ultimate Performance activated."
+              Write-Host "Ultimate Performance activated (existing)."
           } else {
-              powercfg /duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
-              powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61
-              Write-Host "Ultimate Performance created and activated."
+              $dupOutput = powercfg /duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+              $dupGUID = ($dupOutput | Select-String "Power Scheme GUID").ToString().Split(':')[1].Trim()
+              if ($dupGUID) {
+                  powercfg /setactive $dupGUID
+                  Write-Host "Ultimate Performance created and activated."
+              } else {
+                  Write-Host "Failed to create Ultimate Performance plan, keeping current."
+              }
           }
 
-          # Disable Power Throttling
-          Set-ItemProperty `
-            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" `
-            -Name "PowerThrottlingOff" `
-            -Value 1 `
-            -Force
+          # Disable Power Throttling (create key if missing, no try/catch)
+          $ptPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling"
+          if (-not (Test-Path $ptPath)) {
+              New-Item -Path $ptPath -Force -ErrorAction SilentlyContinue | Out-Null
+          }
+          Set-ItemProperty -Path $ptPath -Name "PowerThrottlingOff" -Value 1 -Force -ErrorAction SilentlyContinue
+          Write-Host "Power throttling adjustment attempted."
 
           # Disable Core Parking
-          $CoreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
-
-          Set-ItemProperty -Path $CoreParkingPath -Name "ValueMin" -Value 100 -Force
-          Set-ItemProperty -Path $CoreParkingPath -Name "ValueMax" -Value 100 -Force
+          $coreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
+          if (-not (Test-Path $coreParkingPath)) {
+              New-Item -Path $coreParkingPath -Force -ErrorAction SilentlyContinue | Out-Null
+          }
+          Set-ItemProperty -Path $coreParkingPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $coreParkingPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
+          Write-Host "Core parking adjustment attempted."
 
           # CPU Min/Max 100%
-          $ProcPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
+          $procPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
+          if (-not (Test-Path $procPath)) {
+              New-Item -Path $procPath -Force -ErrorAction SilentlyContinue | Out-Null
+          }
+          Set-ItemProperty -Path $procPath -Name "ValueMin" -Value 100 -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $procPath -Name "ValueMax" -Value 100 -Force -ErrorAction SilentlyContinue
+          Write-Host "CPU min/max adjustment attempted."
 
-          Set-ItemProperty -Path $ProcPath -Name "ValueMin" -Value 100 -Force
-          Set-ItemProperty -Path $ProcPath -Name "ValueMax" -Value 100 -Force
-
+          # Apply power config
           powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100
           powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX 100
           powercfg /setactive scheme_current
 
           # Priority boost for current process
-          $CurrentProcess = Get-Process -Id $PID
-          $CurrentProcess.PriorityClass = "High"
-
-          # Enable large pages (requires admin)
-          try {
-              $LargePagesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
-              Set-ItemProperty -Path $LargePagesPath -Name "LargeSystemCache" -Value 1 -Force
-              Write-Host "Large system cache enabled."
-          } catch {
-              Write-Host "Large system cache skipped."
+          $CurrentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+          if ($CurrentProcess) {
+              $CurrentProcess.PriorityClass = "High"
+              Write-Host "PowerShell priority set to High."
           }
 
-          # Disable unnecessary services
+          # Enable large system cache
+          $LargePagesPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+          Set-ItemProperty -Path $LargePagesPath -Name "LargeSystemCache" -Value 1 -Force -ErrorAction SilentlyContinue
+          Write-Host "Large system cache adjustment attempted."
+
+          # Disable unnecessary services (non-critical)
           $ServicesToStop = @(
               "WSearch",
               "Spooler",
@@ -93,18 +103,15 @@ jobs:
           )
 
           foreach ($Service in $ServicesToStop) {
-              try {
-                  Stop-Service -Name $Service -Force -ErrorAction Stop
-                  Set-Service -Name $Service -StartupType Disabled -ErrorAction Stop
-                  Write-Host "Disabled: $Service"
-              } catch {
-                  Write-Host "Skipped: $Service"
-              }
+              Stop-Service -Name $Service -Force -ErrorAction SilentlyContinue
+              Set-Service -Name $Service -StartupType Disabled -ErrorAction SilentlyContinue
+              Write-Host "Attempted disable: $Service"
           }
 
           # Clear temp files
           Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Temp cleanup attempted."
 
           # Set environment variables for max threads
           [System.Environment]::SetEnvironmentVariable("NUMBER_OF_PROCESSORS", [Environment]::ProcessorCount.ToString(), "Machine")
