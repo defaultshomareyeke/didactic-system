@@ -1,0 +1,692 @@
+name: Windows Cloud RDP - High Performance Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_size:
+        description: 'Select runner size'
+        required: true
+        default: 'xlarge'
+        type: choice
+        options:
+          - 'large'
+          - 'xlarge'
+          - '2xlarge'
+          - '4xlarge'
+      ollama_model:
+        description: 'Ollama model to pre-pull (leave empty to skip)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    # ==========================================
+    # FORCE LARGER RUNNER
+    # ==========================================
+    # Option 1: GitHub-hosted larger runners (paid plans)
+    # runs-on: windows-latest-16-core
+    # runs-on: windows-latest-32-core
+    # runs-on: windows-latest-64-core
+    #
+    # Option 2: Self-hosted with custom labels
+    # runs-on: [self-hosted, windows, x64, high-cpu]
+    #
+    # Option 3: Dynamic selection based on input
+    runs-on: ${{ github.event.inputs.runner_size == '4xlarge' && 'windows-latest-64-core' || github.event.inputs.runner_size == '2xlarge' && 'windows-latest-32-core' || github.event.inputs.runner_size == 'xlarge' && 'windows-latest-16-core' || 'windows-latest-8-core' }}
+    
+    timeout-minutes: 360
+
+    steps:
+
+      # ==========================================
+      # 0. Force High-Performance CPU Mode
+      # ==========================================
+      - name: 0. Configure High-Performance CPU Mode
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=========================================="
+          Write-Host "CPU OPTIMIZATION & VERIFICATION"
+          Write-Host "=========================================="
+
+          # Set power plan to High Performance
+          Write-Host "Setting High Performance power plan..."
+          
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          
+          # Alternative: Ultimate Performance plan
+          $UltimatePlan = powercfg /list | Select-String "Ultimate Performance"
+          
+          if ($UltimatePlan) {
+              $UltimateGUID = ($UltimatePlan -split '\s+')[3]
+              powercfg /setactive $UltimateGUID
+              Write-Host "Ultimate Performance power plan activated."
+          } else {
+              # Create Ultimate Performance plan
+              powercfg /duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+              powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61
+              Write-Host "Ultimate Performance power plan created and activated."
+          }
+
+          # Disable CPU throttling
+          Write-Host ""
+          Write-Host "Disabling CPU throttling..."
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" `
+            -Name "PowerThrottlingOff" `
+            -Value 1 `
+            -Force
+
+          # Disable core parking
+          Write-Host "Disabling core parking..."
+
+          $CoreParkingPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\0cc5b647-c1df-4637-891a-dec35c318583"
+
+          Set-ItemProperty `
+            -Path $CoreParkingPath `
+            -Name "ValueMin" `
+            -Value 100 `
+            -Force
+
+          Set-ItemProperty `
+            -Path $CoreParkingPath `
+            -Name "ValueMax" `
+            -Value 100 `
+            -Force
+
+          # Set processor min/max to 100%
+          $ProcPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\54533251-82be-4824-96c1-47b60b740d00\bc5038f7-23e0-4960-96da-33abaf5935ec"
+
+          Set-ItemProperty `
+            -Path $ProcPath `
+            -Name "ValueMin" `
+            -Value 100 `
+            -Force
+
+          Set-ItemProperty `
+            -Path $ProcPath `
+            -Name "ValueMax" `
+            -Value 100 `
+            -Force
+
+          # Apply changes
+          powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100
+          powercfg /setacvalueindex scheme_current sub_processor PROCTHROTTLEMAX 100
+          powercfg /setactive scheme_current
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "CPU CONFIGURATION"
+          Write-Host "=========================================="
+
+          # Show CPU details
+          $CPU = Get-CimInstance Win32_Processor
+
+          Write-Host "CPU Name: $($CPU.Name)"
+          Write-Host "Physical Cores: $($CPU.NumberOfCores)"
+          Write-Host "Logical Processors: $($CPU.NumberOfLogicalProcessors)"
+          Write-Host "Max Clock Speed: $($CPU.MaxClockSpeed) MHz"
+          Write-Host "Current Clock: $($CPU.CurrentClockSpeed) MHz"
+          Write-Host "L3 Cache: $([math]::Round($CPU.L3CacheSize / 1024, 1)) MB"
+          Write-Host "Socket: $($CPU.SocketDesignation)"
+
+          # Show memory channels
+          $Memory = Get-CimInstance Win32_PhysicalMemory
+          $TotalRAM = ($Memory | Measure-Object -Property Capacity -Sum).Sum / 1GB
+          $MemorySpeed = $Memory[0].Speed
+          $MemoryChannels = $Memory.Count
+
+          Write-Host ""
+          Write-Host "RAM: $([math]::Round($TotalRAM, 1)) GB"
+          Write-Host "Memory Speed: $MemorySpeed MHz"
+          Write-Host "Memory Modules: $MemoryChannels"
+
+          # CPU benchmark
+          Write-Host ""
+          Write-Host "Running quick CPU benchmark..."
+
+          $BenchmarkTime = Measure-Command {
+              $result = 0
+              for ($i = 0; $i -lt 10000000; $i++) {
+                  $result += $i
+              }
+          }
+
+          Write-Host "Benchmark completed in $($BenchmarkTime.TotalSeconds) seconds"
+          Write-Host "Score: $([math]::Round(10000000 / $BenchmarkTime.TotalSeconds, 0)) operations/second"
+
+
+      # ==========================================
+      # 1. Install Python 3.12, VS Code, WinRAR, Ollama
+      # ==========================================
+      - name: 1. Install Python, VS Code, WinRAR & Ollama
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Installing Python 3.12..."
+
+          winget install --id Python.Python.3.12 --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
+
+          Write-Host "Installing Visual Studio Code..."
+
+          winget install --id Microsoft.VisualStudioCode --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
+
+          Write-Host "Installing WinRAR..."
+
+          winget install --id RARLab.WinRAR --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
+
+          # Refresh PATH
+          $env:Path = `
+            [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+            [System.Environment]::GetEnvironmentVariable("Path","User")
+
+          # ==========================================
+          # Install Ollama with CPU optimization
+          # ==========================================
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Installing Ollama (CPU-Optimized)"
+          Write-Host "=========================================="
+
+          # Set Ollama to use all CPU cores
+          $env:OLLAMA_NUM_PARALLEL = [Environment]::ProcessorCount
+          $env:OLLAMA_MAX_LOADED_MODELS = 2
+          $env:OLLAMA_KEEP_ALIVE = "24h"
+
+          # Set Ollama thread count
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_NUM_THREADS", [Environment]::ProcessorCount.ToString(), "Machine")
+          [System.Environment]::SetEnvironmentVariable("OLLAMA_NUM_PARALLEL", [Environment]::ProcessorCount.ToString(), "Machine")
+
+          $OllamaInstaller = "$env:TEMP\OllamaSetup.exe"
+
+          Invoke-WebRequest `
+            -Uri "https://ollama.com/download/OllamaSetup.exe" `
+            -OutFile $OllamaInstaller
+
+          if (!(Test-Path $OllamaInstaller)) {
+              throw "Ollama installer download failed."
+          }
+
+          Start-Process `
+            -FilePath $OllamaInstaller `
+            -ArgumentList "/silent" `
+            -Wait
+
+          Start-Sleep -Seconds 10
+
+          # Refresh PATH again
+          $env:Path = `
+            [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+            [System.Environment]::GetEnvironmentVariable("Path","User")
+
+          $OllamaPaths = @(
+              "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe",
+              "$env:ProgramFiles\Ollama\ollama.exe"
+          )
+
+          $Ollama = $null
+
+          foreach ($Path in $OllamaPaths) {
+              if (Test-Path $Path) {
+                  $Ollama = $Path
+                  break
+              }
+          }
+
+          if ($null -eq $Ollama) {
+              $OllamaCommand = Get-Command ollama.exe -ErrorAction SilentlyContinue
+
+              if ($null -ne $OllamaCommand) {
+                  $Ollama = $OllamaCommand.Source
+              }
+          }
+
+          if ($null -eq $Ollama) {
+              throw "Ollama installation failed."
+          }
+
+          Write-Host "Ollama installed successfully."
+          Write-Host "Ollama path: $Ollama"
+          Write-Host "CPU Threads: $([Environment]::ProcessorCount)"
+
+          & $Ollama --version
+
+          # ==========================================
+          # Pre-pull Ollama model if specified
+          # ==========================================
+          if ($env:OLLAMA_MODEL -ne "") {
+              Write-Host ""
+              Write-Host "Pulling model: $env:OLLAMA_MODEL"
+              & $Ollama pull $env:OLLAMA_MODEL
+          }
+
+          # ==========================================
+          # Download MoneyPrinterTurbo Keys
+          # ==========================================
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "Downloading MoneyPrinterTurbo Keys"
+          Write-Host "=========================================="
+
+          $Downloads = Join-Path $env:USERPROFILE "Downloads"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $Downloads | Out-Null
+
+          $KeysUrl = "https://raw.githubusercontent.com/defaultshomareyeke/didactic-system/refs/heads/main/moneyprinterturbo-keys.json"
+          $KeysPath = Join-Path $Downloads "moneyprinterturbo-keys.json"
+
+          Invoke-WebRequest `
+            -Uri $KeysUrl `
+            -OutFile $KeysPath
+
+          if (!(Test-Path $KeysPath)) {
+              throw "moneyprinterturbo-keys.json download failed."
+          }
+
+          Write-Host "Keys downloaded successfully."
+        env:
+          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+
+
+      # ==========================================
+      # 2. Enable Remote Desktop
+      # ==========================================
+      - name: 2. Enable Remote Desktop & Firewall
+        shell: powershell
+        run: |
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop"
+
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0
+
+          # Enable hardware acceleration over RDP
+          Set-ItemProperty `
+            -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
+            -Name "bEnumerateHWBeforeTS" `
+            -Value 1 `
+            -Force
+
+          # Set RDP to use all available CPU cores
+          Set-ItemProperty `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
+            -Name "NUMBER_OF_PROCESSORS" `
+            -Value [Environment]::ProcessorCount `
+            -Force
+
+          Write-Host "Remote Desktop enabled."
+
+
+      # ==========================================
+      # 3. Create Admin Account
+      # ==========================================
+      - name: 3. Create Admin Account
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $Username = "iliya"
+          $PasswordText = "123"
+
+          $Password = ConvertTo-SecureString `
+            $PasswordText `
+            -AsPlainText `
+            -Force
+
+          $ExistingUser = Get-LocalUser `
+            -Name $Username `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $ExistingUser) {
+              Remove-LocalUser `
+                -Name $Username `
+                -ErrorAction SilentlyContinue
+          }
+
+          New-LocalUser `
+            -Name $Username `
+            -Password $Password `
+            -PasswordNeverExpires `
+            -UserMayNotChangePassword `
+            -Description "RDP Administrator"
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $Username
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "RDP USER CONFIGURED"
+          Write-Host "=========================================="
+          Write-Host "Username : $Username"
+          Write-Host "Password : $PasswordText"
+          Write-Host "Port     : 3389"
+          Write-Host "CPU Cores: $([Environment]::ProcessorCount)"
+          Write-Host "=========================================="
+
+
+      # ==========================================
+      # 4. Install & Connect Tailscale
+      # ==========================================
+      - name: 4. Install & Connect Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Downloading Tailscale..."
+
+          Invoke-WebRequest `
+            "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" `
+            -OutFile "C:\tailscale.msi"
+
+          Write-Host "Installing Tailscale..."
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList "/i C:\tailscale.msi /quiet /norestart" `
+            -Wait
+
+          Start-Sleep -Seconds 8
+
+          $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
+
+          if (!(Test-Path $Tailscale)) {
+              throw "Tailscale installation failed."
+          }
+
+          Write-Host "Connecting to Tailscale..."
+
+          & $Tailscale up `
+            --authkey="$Env:TAILSCALE_AUTHKEY" `
+            --hostname="github-rdp-hpc-server"
+
+          Start-Sleep -Seconds 10
+
+          $ts_ip = & $Tailscale ip -4
+
+          Write-Host ""
+          Write-Host "=================================================="
+          Write-Host "        HIGH PERFORMANCE RDP SERVER READY"
+          Write-Host "=================================================="
+          Write-Host "Tailscale IP : $ts_ip"
+          Write-Host "Username     : iliya"
+          Write-Host "Password     : 123"
+          Write-Host "Port         : 3389"
+          Write-Host "CPU Cores    : $([Environment]::ProcessorCount)"
+          Write-Host "=================================================="
+
+
+      # ==========================================
+      # 5. Download MoneyPrinter Projects
+      # ==========================================
+      - name: 5. Download MoneyPrinter Projects
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $Base = "C:\MoneyPrinters"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $Base | Out-Null
+
+          Write-Host ""
+          Write-Host "Downloading MoneyPrinter..."
+
+          git clone `
+            --depth 1 `
+            https://github.com/FujiwaraChoki/MoneyPrinter.git `
+            "$Base\MoneyPrinter"
+
+          Write-Host ""
+          Write-Host "Downloading MoneyPrinterV2..."
+
+          git clone `
+            --depth 1 `
+            https://github.com/FujiwaraChoki/MoneyPrinterV2.git `
+            "$Base\MoneyPrinterV2"
+
+          Write-Host ""
+          Write-Host "Downloading MoneyPrinterTurbo..."
+
+          git clone `
+            --depth 1 `
+            https://github.com/harry0703/MoneyPrinterTurbo.git `
+            "$Base\MoneyPrinterTurbo"
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "All projects downloaded"
+          Write-Host "=========================================="
+
+          Get-ChildItem $Base |
+            Select-Object Name, FullName
+
+
+      # ==========================================
+      # 6. Prepare Fonts Folders
+      # ==========================================
+      - name: 6. Prepare Fonts Folders
+        shell: powershell
+        run: |
+          $Base = "C:\MoneyPrinters"
+
+          $Projects = @(
+            "$Base\MoneyPrinter",
+            "$Base\MoneyPrinterV2",
+            "$Base\MoneyPrinterTurbo"
+          )
+
+          foreach ($Project in $Projects) {
+
+              $Fonts = Join-Path $Project "fonts"
+
+              New-Item `
+                -ItemType Directory `
+                -Force `
+                -Path $Fonts | Out-Null
+
+              Write-Host "Fonts folder ready:"
+              Write-Host $Fonts
+          }
+
+
+      # ==========================================
+      # 7. Download Vazirmatn from GitHub
+      # ==========================================
+      - name: 7. Add Vazirmatn to MoneyPrinterV2
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $Base = "C:\MoneyPrinters"
+          $ProjectFonts = "$Base\MoneyPrinterV2\fonts"
+          $VazirRepo = "C:\vazirmatn"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $ProjectFonts | Out-Null
+
+          Write-Host ""
+          Write-Host "Downloading Vazirmatn..."
+
+          git clone `
+            --depth 1 `
+            https://github.com/rastikerdar/vazirmatn.git `
+            $VazirRepo
+
+          if (!(Test-Path $VazirRepo)) {
+              throw "Vazirmatn repository was not downloaded."
+          }
+
+          $FontFiles = Get-ChildItem `
+            $VazirRepo `
+            -Recurse `
+            -Include *.ttf,*.otf
+
+          if ($FontFiles.Count -eq 0) {
+              throw "No Vazirmatn font files were found."
+          }
+
+          foreach ($Font in $FontFiles) {
+
+              Copy-Item `
+                $Font.FullName `
+                $ProjectFonts `
+                -Force
+
+              Write-Host "Copied: $($Font.Name)"
+          }
+
+          Write-Host ""
+          Write-Host "Vazirmatn installation complete"
+
+          Get-ChildItem `
+            $ProjectFonts `
+            -Include *.ttf,*.otf |
+            Select-Object Name, Length
+
+
+      # ==========================================
+      # 8. Verify Project Structure
+      # ==========================================
+      - name: 8. Verify Projects
+        shell: powershell
+        run: |
+          $Base = "C:\MoneyPrinters"
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "MoneyPrinter"
+          Write-Host "=============================================="
+
+          Get-ChildItem `
+            "$Base\MoneyPrinter" `
+            -Force |
+            Select-Object Name, Mode
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "MoneyPrinterV2"
+          Write-Host "=============================================="
+
+          Get-ChildItem `
+            "$Base\MoneyPrinterV2" `
+            -Force |
+            Select-Object Name, Mode
+
+          Write-Host ""
+          Write-Host "MoneyPrinterV2 Fonts:"
+
+          Get-ChildItem `
+            "$Base\MoneyPrinterV2\fonts" `
+            -Include *.ttf,*.otf |
+            Select-Object Name
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "MoneyPrinterTurbo"
+          Write-Host "=============================================="
+
+          Get-ChildItem `
+            "$Base\MoneyPrinterTurbo" `
+            -Force |
+            Select-Object Name, Mode
+
+
+      # ==========================================
+      # 9. System Information
+      # ==========================================
+      - name: 9. Show System Information
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "========== CPU =========="
+
+          Get-CimInstance Win32_Processor |
+            Select-Object Name,
+              NumberOfCores,
+              NumberOfLogicalProcessors,
+              MaxClockSpeed,
+              L3CacheSize
+
+          Write-Host ""
+          Write-Host "========== RAM =========="
+
+          $RAM = Get-CimInstance Win32_ComputerSystem
+          $Memory = Get-CimInstance Win32_PhysicalMemory
+
+          Write-Host "Total RAM: $([math]::Round($RAM.TotalPhysicalMemory / 1GB, 2)) GB"
+          Write-Host "Memory Speed: $($Memory[0].Speed) MHz"
+          Write-Host "Memory Modules: $($Memory.Count)"
+
+          Write-Host ""
+          Write-Host "========== C: DRIVE =========="
+
+          $Drive = Get-PSDrive C
+
+          Write-Host "Used:"
+          Write-Host "$([math]::Round($Drive.Used / 1GB, 2)) GB"
+
+          Write-Host "Free:"
+          Write-Host "$([math]::Round($Drive.Free / 1GB, 2)) GB"
+
+          Write-Host ""
+          Write-Host "========== CPU BENCHMARK =========="
+
+          $BenchmarkTime = Measure-Command {
+              $result = 0
+              for ($i = 0; $i -lt 50000000; $i++) {
+                  $result += $i
+              }
+          }
+
+          Write-Host "50M operations completed in $($BenchmarkTime.TotalSeconds) seconds"
+          Write-Host "Performance: $([math]::Round(50000000 / $BenchmarkTime.TotalSeconds, 0)) ops/sec"
+
+
+      # ==========================================
+      # 10. Keep Server Alive - 6 Hours
+      # ==========================================
+      - name: 10. Keep Server Alive
+        shell: powershell
+        run: |
+          for ($i = 1; $i -le 360; $i++) {
+
+              Start-Sleep -Seconds 60
+
+              $free = Get-PSDrive C |
+                Select-Object -ExpandProperty Free
+
+              $freeGB = [math]::Round(
+                $free / 1GB,
+                2
+              )
+
+              $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
+
+              Write-Host "[$i/360] HPC Server running | CPU: $cpuLoad% | C: Free = $freeGB GB"
+          }
