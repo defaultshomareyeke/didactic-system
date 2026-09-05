@@ -1,4 +1,5 @@
 name: Windows Cloud RDP - All on D + Ollama Cache
+run-name: RDP Server #${{ github.run_number }} - Model: ${{ github.event.inputs.ollama_model }}
 
 on:
   workflow_dispatch:
