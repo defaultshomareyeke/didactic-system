@@ -1,18 +1,24 @@
 name: 'Windows Cloud RDP - All on D + Ollama Cache'
-run-name: 'RDP Server #${{ github.run_number }} - Model: ${{ github.event.inputs.ollama_model }}'
+run-name: 'RDP Server #${{ github.run_number }} - Multi-model Ollama'
 
 on:
   workflow_dispatch:
     inputs:
-      ollama_model:
-        description: 'Select the Ollama model to download'
-        required: true
-        type: choice
-        options:
-          - 'llama3.1:8b'
-          - 'qwen3.5:9b'
-          - 'qwen3.5:4b'
-        default: 'llama3.1:8b'
+      pull_llama31_8b:
+        description: 'Download llama3.1:8b'
+        required: false
+        type: boolean
+        default: true
+      pull_qwen35_9b:
+        description: 'Download qwen3.5:9b'
+        required: false
+        type: boolean
+        default: false
+      pull_qwen35_4b:
+        description: 'Download qwen3.5:4b'
+        required: false
+        type: boolean
+        default: false
       install_python:
         description: 'Install Python 3.12'
         required: false
@@ -428,11 +434,11 @@ jobs:
 
       - name: '4. Cache Ollama Models'
         id: cache-ollama
-        if: ${{ inputs.ollama_model != '' }}
+        if: ${{ inputs.pull_llama31_8b || inputs.pull_qwen35_9b || inputs.pull_qwen35_4b }}
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.OLLAMA_MODELS }}
-          key: ollama-${{ runner.os }}-${{ github.event.inputs.ollama_model }}
+          key: ollama-${{ runner.os }}-l31-${{ inputs.pull_llama31_8b }}-q35-9b-${{ inputs.pull_qwen35_9b }}-q35-4b-${{ inputs.pull_qwen35_4b }}
 
       - name: '5. Download MoneyPrinter Projects'
         if: ${{ inputs.install_projects }}
@@ -536,7 +542,8 @@ jobs:
         if: ${{ inputs.create_shortcuts }}
         shell: powershell
         env:
-          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
         run: |
           $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
           $ws = New-Object -ComObject WScript.Shell
@@ -553,17 +560,21 @@ jobs:
             }
           }
           @('start-ollama.bat','@echo off','start "" "D:\Ollama\ollama.exe" serve') -join "`r`n" | Set-Content (Join-Path $desktop 'start-ollama.bat')
-          if ($env:OLLAMA_MODEL -like 'qwen3.5:*') {
-            $launcher = Join-Path $desktop 'Qwen-Web-Search.bat'
+          $qwenModels = @()
+          if ($env:PULL_QWEN35_9B -eq 'true') { $qwenModels += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $qwenModels += 'qwen3.5:4b' }
+          foreach ($model in $qwenModels) {
+            $safeName = $model.Replace(':', '-')
+            $launcher = Join-Path $desktop "Qwen-Web-Search-$safeName.bat"
             @(
               '@echo off',
-              'title Qwen Web Search',
+              "title Qwen Web Search - $model",
               '"D:\Ollama\ollama.exe" signin',
               'if errorlevel 1 pause & exit /b 1',
-              "`"D:\Ollama\ollama.exe`" launch openclaw --model $env:OLLAMA_MODEL",
+              "`"D:\Ollama\ollama.exe`" launch openclaw --model $model",
               'pause'
             ) | Set-Content $launcher -Encoding ascii
-            $lnk = $ws.CreateShortcut((Join-Path $desktop 'Qwen Web Search.lnk'))
+            $lnk = $ws.CreateShortcut((Join-Path $desktop "Qwen Web Search - $safeName.lnk"))
             $lnk.TargetPath = $launcher
             $lnk.WorkingDirectory = $desktop
             $lnk.Save()
@@ -587,7 +598,9 @@ jobs:
       - name: '8. Pull Ollama Model'
         shell: powershell
         env:
-          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
         run: |
           $ErrorActionPreference = "Stop"
           $ollamaExe = "D:\Ollama\ollama.exe"
@@ -605,13 +618,18 @@ jobs:
               }
           }
           if (!$ready) { throw "Ollama server did not become ready." }
-          if (![string]::IsNullOrWhiteSpace($env:OLLAMA_MODEL)) {
-              & $ollamaExe pull $env:OLLAMA_MODEL
-              if ($LASTEXITCODE -ne 0) { throw "Ollama model download failed." }
+          $models = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $models += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $models += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
+          foreach ($model in $models) {
+              & $ollamaExe pull $model
+              if ($LASTEXITCODE -ne 0) { throw "Ollama model download failed: $model" }
           }
+          Write-Host "Selected Ollama models: $($models -join ', ')"
 
       - name: 'Save Ollama models before the RDP session'
-        if: ${{ inputs.ollama_model != '' && steps.cache-ollama.outputs.cache-hit != 'true' }}
+        if: ${{ (inputs.pull_llama31_8b || inputs.pull_qwen35_9b || inputs.pull_qwen35_4b) && steps.cache-ollama.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ env.OLLAMA_MODELS }}
@@ -620,7 +638,9 @@ jobs:
       - name: '9. Create Desktop Status & Dashboard'
         shell: powershell
         env:
-          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
           KEEP_ALIVE_HOURS: ${{ inputs.keep_alive_hours }}
           DASHBOARD_PORT: ${{ inputs.dashboard_port }}
         run: |
@@ -633,20 +653,25 @@ jobs:
           $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
           $os = Get-CimInstance Win32_OperatingSystem
           $ramUsed = [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100, 1)
+          $models = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $models += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $models += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
+          $modelText = if ($models.Count) { $models -join ', ' } else { 'None' }
           @"
           RDP STATUS
           ==========
           IP: $ip
           Port: 3389
           Username: iliya
-          Ollama model: $env:OLLAMA_MODEL
+          Ollama models: $modelText
           D free: $freeGB GB
           Scheduled shutdown: $($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))
           Updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
           "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.txt')
           @"
           <!doctype html><html><head><meta charset='utf-8'><title>RDP Status</title><meta http-equiv='refresh' content='60'><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}</style></head><body><h1>RDP Runner Status</h1><table>
-          <tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama model</td><td>$env:OLLAMA_MODEL</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
+          <tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
           "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.html')
 
       - name: '9. Serve Dashboard on Network'
@@ -724,7 +749,9 @@ jobs:
           KEEP_ALIVE_HOURS: ${{ inputs.keep_alive_hours }}
           DASHBOARD_PORT: ${{ inputs.dashboard_port }}
           DOWNLOAD_PORT: ${{ inputs.download_port }}
-          OLLAMA_MODEL: ${{ github.event.inputs.ollama_model }}
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
         shell: powershell
         run: |
           $python = "C:\Program Files\Python312\python.exe"
@@ -764,6 +791,11 @@ jobs:
 
           $dashboardPort = [int]$env:DASHBOARD_PORT
           $downloadPort = [int]$env:DOWNLOAD_PORT
+          $models = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $models += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $models += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
+          $modelText = if ($models.Count) { $models -join ', ' } else { 'None' }
           $shutdown = (Get-Date).AddHours([double]$env:KEEP_ALIVE_HOURS)
           if (!(Test-HttpServer $dashboardPort '/RDP-STATUS.html')) { Restart-HttpServer $dashboardPort $desktop 'dashboard' }
           if (!(Test-HttpServer $downloadPort)) { Restart-HttpServer $downloadPort $downloadDirectory 'download-server' }
@@ -807,7 +839,7 @@ jobs:
               try { $null = Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 2; $ollamaOk = $true } catch {}
               $ip = (& $tailscale ip -4).Trim()
               $updated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-              $dashboardHtml = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Status</title><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}.bad{color:#f66}</style></head><body><h1>RDP Runner Status</h1><table><tr><td>IP</td><td>$ip</td></tr><tr><td>Ollama model</td><td>$env:OLLAMA_MODEL</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>$freeGB GB</td></tr><tr><td>Ollama</td><td>$ollamaOk</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$updated</td></tr></table></body></html>"
+              $dashboardHtml = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Status</title><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}.bad{color:#f66}</style></head><body><h1>RDP Runner Status</h1><table><tr><td>IP</td><td>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>$freeGB GB</td></tr><tr><td>Ollama</td><td>$ollamaOk</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$updated</td></tr></table></body></html>"
               $dashboardHtml | Set-Content (Join-Path $desktop 'RDP-STATUS.html') -Encoding utf8
               Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $downloadDirectory 'RDP-STATUS.html') -Force
               $line = "| $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $cpuLoad% | $ramUsed% | $freeGB GB | $tsOk | $ollamaOk |"
