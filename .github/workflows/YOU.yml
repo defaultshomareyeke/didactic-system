@@ -731,7 +731,9 @@ jobs:
           & $tailscale serve --bg --http=$port "http://127.0.0.1:$port"
           if ($LASTEXITCODE -ne 0) { throw "Tailscale HTTP Serve failed for dashboard port $port." }
           $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
-          $url = "http://$ip`:$port/RDP-STATUS.html"
+          $tailnetDns = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+          if ([string]::IsNullOrWhiteSpace($tailnetDns)) { throw 'Tailscale MagicDNS name is missing.' }
+          $url = "http://$tailnetDns`:$port/RDP-STATUS.html"
           Start-Sleep -Seconds 2
           $null = Invoke-WebRequest $url -UseBasicParsing -TimeoutSec 10
           & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-dashboard.log"
@@ -766,8 +768,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Tailscale HTTP Serve failed for download port $port." }
 
           $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
-          $downloadUrl = "http://$ip`:$port/"
-          $dashboardFallbackUrl = "http://$ip`:$port/RDP-STATUS.html"
+          $tailnetDns = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+          if ([string]::IsNullOrWhiteSpace($tailnetDns)) { throw 'Tailscale MagicDNS name is missing.' }
+          $downloadUrl = "http://$tailnetDns`:$port/"
+          $dashboardFallbackUrl = "http://$tailnetDns`:$port/RDP-STATUS.html"
           Start-Sleep -Seconds 2
           $null = Invoke-WebRequest $downloadUrl -UseBasicParsing -TimeoutSec 10
           & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-download.log"
@@ -804,11 +808,17 @@ jobs:
               } catch { return $false }
           }
 
-          function Test-TailscaleHttp([string]$Ip, [int]$Port, [string]$Path = '/') {
+          function Test-TailscaleHttp([string]$Address, [int]$Port, [string]$Path = '/') {
               try {
-                  $response = Invoke-WebRequest "http://${Ip}:${Port}${Path}" -UseBasicParsing -TimeoutSec 8
+                  $response = Invoke-WebRequest "http://${Address}:${Port}${Path}" -UseBasicParsing -TimeoutSec 8
                   return ($response.StatusCode -eq 200)
               } catch { return $false }
+          }
+
+          function Get-TailscaleDnsName {
+              $dnsName = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+              if ([string]::IsNullOrWhiteSpace($dnsName)) { throw 'Tailscale MagicDNS name is missing.' }
+              return $dnsName
           }
 
           function Set-TailscaleHttpProxy([int]$Port) {
@@ -840,9 +850,10 @@ jobs:
           Set-TailscaleHttpProxy $dashboardPort
           Set-TailscaleHttpProxy $downloadPort
           $ip = (& $tailscale ip -4).Trim()
+          $tailnetDns = Get-TailscaleDnsName
           Start-Sleep -Seconds 2
-          if (!(Test-TailscaleHttp $ip $dashboardPort '/RDP-STATUS.html')) { throw "Dashboard is healthy locally but unavailable through Tailscale at http://${ip}:$dashboardPort/." }
-          if (!(Test-TailscaleHttp $ip $downloadPort)) { throw "Download server is healthy locally but unavailable through Tailscale at http://${ip}:$downloadPort/." }
+          if (!(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) { throw "Dashboard is healthy locally but unavailable through Tailscale at http://${tailnetDns}:$dashboardPort/." }
+          if (!(Test-TailscaleHttp $tailnetDns $downloadPort)) { throw "Download server is healthy locally but unavailable through Tailscale at http://${tailnetDns}:$downloadPort/." }
           & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-status.log"
 
           $iterations = [int]$env:KEEP_ALIVE_HOURS * 60
@@ -857,11 +868,12 @@ jobs:
                   Restart-HttpServer $downloadPort $downloadDirectory 'download-server'
               }
               $ip = (& $tailscale ip -4).Trim()
-              if (!(Test-TailscaleHttp $ip $dashboardPort '/RDP-STATUS.html')) {
+              $tailnetDns = Get-TailscaleDnsName
+              if (!(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) {
                   Write-Warning "Dashboard Tailscale proxy stopped responding; rebuilding it."
                   Set-TailscaleHttpProxy $dashboardPort
               }
-              if (!(Test-TailscaleHttp $ip $downloadPort)) {
+              if (!(Test-TailscaleHttp $tailnetDns $downloadPort)) {
                   Write-Warning "Download Tailscale proxy stopped responding; rebuilding it."
                   Set-TailscaleHttpProxy $downloadPort
               }
