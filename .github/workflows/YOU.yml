@@ -579,6 +579,7 @@ jobs:
         if: ${{ inputs.create_shortcuts }}
         shell: powershell
         env:
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
           PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
           PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
         run: |
@@ -597,21 +598,22 @@ jobs:
             }
           }
           @('start-ollama.bat','@echo off','start "" "D:\Ollama\ollama.exe" serve') -join "`r`n" | Set-Content (Join-Path $desktop 'start-ollama.bat')
-          $qwenModels = @()
-          if ($env:PULL_QWEN35_9B -eq 'true') { $qwenModels += 'qwen3.5:9b' }
-          if ($env:PULL_QWEN35_4B -eq 'true') { $qwenModels += 'qwen3.5:4b' }
-          foreach ($model in $qwenModels) {
+          $selectedModels = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $selectedModels += 'llama3.1:8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $selectedModels += 'qwen3.5:9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $selectedModels += 'qwen3.5:4b' }
+          foreach ($model in $selectedModels) {
             $safeName = $model.Replace(':', '-')
-            $launcher = Join-Path $desktop "Qwen-Web-Search-$safeName.bat"
+            $launcher = Join-Path $desktop "AI-Web-Search-$safeName.bat"
             @(
               '@echo off',
-              "title Qwen Web Search - $model",
+              "title AI Web Search - $model",
               '"D:\Ollama\ollama.exe" signin',
               'if errorlevel 1 pause & exit /b 1',
-              "`"D:\Ollama\ollama.exe`" launch openclaw --model $model",
+              "`"D:\Ollama\ollama.exe`" launch openclaw --model $model --yes",
               'pause'
             ) | Set-Content $launcher -Encoding ascii
-            $lnk = $ws.CreateShortcut((Join-Path $desktop "Qwen Web Search - $safeName.lnk"))
+            $lnk = $ws.CreateShortcut((Join-Path $desktop "AI Web Search - $safeName.lnk"))
             $lnk.TargetPath = $launcher
             $lnk.WorkingDirectory = $desktop
             $lnk.Save()
@@ -710,6 +712,7 @@ jobs:
           <!doctype html><html><head><meta charset='utf-8'><title>RDP Status</title><meta http-equiv='refresh' content='60'><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}</style></head><body><h1>RDP Runner Status</h1><table>
           <tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
           "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.html')
+          Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $desktop 'index.html') -Force
 
       - name: '9. Serve Dashboard on Network'
         shell: powershell
@@ -724,6 +727,7 @@ jobs:
           if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
           if (!$python) { throw "Python is required to serve the dashboard." }
           $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
+          $dashboard.Id | Set-Content 'D:\dashboard.pid'
           Start-Sleep -Seconds 2
           if ($dashboard.HasExited) { throw "Dashboard web server failed to start." }
           $null = Invoke-WebRequest "http://127.0.0.1:$port/RDP-STATUS.html" -UseBasicParsing -TimeoutSec 5
@@ -733,7 +737,7 @@ jobs:
           $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4).Trim()
           $tailnetDns = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
           if ([string]::IsNullOrWhiteSpace($tailnetDns)) { throw 'Tailscale MagicDNS name is missing.' }
-          $url = "http://$tailnetDns`:$port/RDP-STATUS.html"
+          $url = "http://$tailnetDns`:$port/"
           Start-Sleep -Seconds 2
           $null = Invoke-WebRequest $url -UseBasicParsing -TimeoutSec 10
           & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-dashboard.log"
@@ -753,6 +757,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
           $dashboardFile = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'RDP-STATUS.html'
           if (Test-Path $dashboardFile) { Copy-Item $dashboardFile (Join-Path $downloadDirectory 'RDP-STATUS.html') -Force }
+          $fileRows = @(Get-ChildItem $downloadDirectory -File | Where-Object Name -ne 'index.html' | Sort-Object Name | ForEach-Object {
+              $name = [Net.WebUtility]::HtmlEncode($_.Name)
+              $urlName = [uri]::EscapeDataString($_.Name)
+              $size = if ($_.Length -ge 1GB) { '{0:N2} GB' -f ($_.Length / 1GB) } elseif ($_.Length -ge 1MB) { '{0:N1} MB' -f ($_.Length / 1MB) } else { '{0:N0} KB' -f [math]::Max(1, ($_.Length / 1KB)) }
+              "<tr><td><a href='$urlName'>$name</a></td><td>$size</td><td>$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))</td></tr>"
+          }) -join "`n"
+          if ([string]::IsNullOrWhiteSpace($fileRows)) { $fileRows = '<tr><td colspan="3">No files are available yet.</td></tr>' }
+          @"
+          <!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Downloads</title><style>body{font-family:Segoe UI;background:#10131a;color:#eef;padding:32px;max-width:1000px;margin:auto}h1{color:#7dd3fc}table{width:100%;border-collapse:collapse;background:#181d28}th,td{text-align:left;padding:13px;border-bottom:1px solid #303849}a{color:#86efac;text-decoration:none}a:hover{text-decoration:underline}.note{color:#aab4c8}</style></head><body><h1>RDP Downloads</h1><p class='note'>Files placed in D:\Downloads appear here automatically. This page refreshes every 60 seconds.</p><p><a href='RDP-STATUS.html'>Open server status</a></p><table><thead><tr><th>File</th><th>Size</th><th>Updated</th></tr></thead><tbody>$fileRows</tbody></table></body></html>
+          "@ | Set-Content (Join-Path $downloadDirectory 'index.html') -Encoding utf8
           New-NetFirewallRule -DisplayName "Browser Download Server $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
           $python = "C:\Program Files\Python312\python.exe"
@@ -760,6 +774,7 @@ jobs:
           if (!$python) { throw "Python is required to start the download server." }
 
           $downloadServer = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$downloadDirectory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\download-server.log" -RedirectStandardError "D:\download-server-error.log"
+          $downloadServer.Id | Set-Content 'D:\download-server.pid'
           Start-Sleep -Seconds 2
           if ($downloadServer.HasExited) { throw "Browser download server failed to start." }
           $null = Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 5
@@ -802,10 +817,14 @@ jobs:
           $downloadDirectory = "D:\Downloads"
 
           function Test-HttpServer([int]$Port, [string]$Path = '/') {
-              try {
-                  $response = Invoke-WebRequest "http://127.0.0.1:${Port}${Path}" -UseBasicParsing -TimeoutSec 4
-                  return ($response.StatusCode -eq 200)
-              } catch { return $false }
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                  try {
+                      $response = Invoke-WebRequest "http://127.0.0.1:${Port}${Path}" -UseBasicParsing -TimeoutSec 5
+                      if ($response.StatusCode -eq 200) { return $true }
+                  } catch {}
+                  Start-Sleep -Seconds 2
+              }
+              return $false
           }
 
           function Test-TailscaleHttp([string]$Address, [int]$Port, [string]$Path = '/') {
@@ -817,23 +836,50 @@ jobs:
 
           function Get-TailscaleDnsName {
               $dnsName = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
-              if ([string]::IsNullOrWhiteSpace($dnsName)) { throw 'Tailscale MagicDNS name is missing.' }
+              if ([string]::IsNullOrWhiteSpace($dnsName)) {
+                  Write-Warning 'Tailscale MagicDNS name is temporarily unavailable.'
+                  return $null
+              }
               return $dnsName
           }
 
           function Set-TailscaleHttpProxy([int]$Port) {
-              & $tailscale serve --bg --http=$Port "http://127.0.0.1:$Port"
-              if ($LASTEXITCODE -ne 0) { throw "Tailscale HTTP Serve failed for port $Port." }
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                  & $tailscale serve --bg --http=$Port "http://127.0.0.1:$Port"
+                  if ($LASTEXITCODE -eq 0) { return $true }
+                  Start-Sleep -Seconds 3
+              }
+              Write-Warning "Tailscale HTTP Serve failed for port $Port; the monitor will retry next minute."
+              return $false
+          }
+
+          function Update-DownloadIndex {
+              $fileRows = @(Get-ChildItem $downloadDirectory -File | Where-Object Name -ne 'index.html' | Sort-Object Name | ForEach-Object {
+                  $name = [Net.WebUtility]::HtmlEncode($_.Name)
+                  $urlName = [uri]::EscapeDataString($_.Name)
+                  $size = if ($_.Length -ge 1GB) { '{0:N2} GB' -f ($_.Length / 1GB) } elseif ($_.Length -ge 1MB) { '{0:N1} MB' -f ($_.Length / 1MB) } else { '{0:N0} KB' -f [math]::Max(1, ($_.Length / 1KB)) }
+                  "<tr><td><a href='$urlName'>$name</a></td><td>$size</td><td>$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))</td></tr>"
+              }) -join "`n"
+              if ([string]::IsNullOrWhiteSpace($fileRows)) { $fileRows = '<tr><td colspan="3">No files are available yet.</td></tr>' }
+              $html = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Downloads</title><style>body{font-family:Segoe UI;background:#10131a;color:#eef;padding:32px;max-width:1000px;margin:auto}h1{color:#7dd3fc}table{width:100%;border-collapse:collapse;background:#181d28}th,td{text-align:left;padding:13px;border-bottom:1px solid #303849}a{color:#86efac;text-decoration:none}a:hover{text-decoration:underline}.note{color:#aab4c8}</style></head><body><h1>RDP Downloads</h1><p class='note'>Files placed in D:\Downloads appear here automatically. This page refreshes every 60 seconds.</p><p><a href='RDP-STATUS.html'>Open server status</a></p><table><thead><tr><th>File</th><th>Size</th><th>Updated</th></tr></thead><tbody>$fileRows</tbody></table></body></html>"
+              $html | Set-Content (Join-Path $downloadDirectory 'index.html') -Encoding utf8
           }
 
           function Restart-HttpServer([int]$Port, [string]$Directory, [string]$LogName) {
-              Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-                  Select-Object -ExpandProperty OwningProcess -Unique |
-                  ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+              $pidFile = "D:\$LogName.pid"
+              if (Test-Path $pidFile) {
+                  $serverPid = [int](Get-Content $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+                  if ($serverPid -gt 0) { Stop-Process -Id $serverPid -Force -ErrorAction SilentlyContinue }
+              }
               Start-Sleep -Seconds 1
-              Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$Port",'--bind','127.0.0.1','--directory',$Directory) -WindowStyle Hidden -RedirectStandardOutput "D:\$LogName.log" -RedirectStandardError "D:\$LogName-error.log"
+              $process = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$Port",'--bind','127.0.0.1','--directory',$Directory) -PassThru -WindowStyle Hidden -RedirectStandardOutput "D:\$LogName.log" -RedirectStandardError "D:\$LogName-error.log"
+              $process.Id | Set-Content $pidFile
               Start-Sleep -Seconds 2
-              if (!(Test-HttpServer $Port)) { throw "HTTP server on port $Port could not be restarted." }
+              if (!(Test-HttpServer $Port)) {
+                  Write-Warning "HTTP server on port $Port could not be restarted now; the monitor will retry next minute."
+                  return $false
+              }
+              return $true
           }
 
           $dashboardPort = [int]$env:DASHBOARD_PORT
@@ -852,8 +898,8 @@ jobs:
           $ip = (& $tailscale ip -4).Trim()
           $tailnetDns = Get-TailscaleDnsName
           Start-Sleep -Seconds 2
-          if (!(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) { throw "Dashboard is healthy locally but unavailable through Tailscale at http://${tailnetDns}:$dashboardPort/." }
-          if (!(Test-TailscaleHttp $tailnetDns $downloadPort)) { throw "Download server is healthy locally but unavailable through Tailscale at http://${tailnetDns}:$downloadPort/." }
+          if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) { Write-Warning "Dashboard is temporarily unavailable through Tailscale at http://${tailnetDns}:$dashboardPort/." }
+          if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $downloadPort)) { Write-Warning "Download server is temporarily unavailable through Tailscale at http://${tailnetDns}:$downloadPort/." }
           & $tailscale serve status | Tee-Object -FilePath "D:\tailscale-serve-status.log"
 
           $iterations = [int]$env:KEEP_ALIVE_HOURS * 60
@@ -869,11 +915,11 @@ jobs:
               }
               $ip = (& $tailscale ip -4).Trim()
               $tailnetDns = Get-TailscaleDnsName
-              if (!(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) {
+              if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $dashboardPort '/RDP-STATUS.html')) {
                   Write-Warning "Dashboard Tailscale proxy stopped responding; rebuilding it."
                   Set-TailscaleHttpProxy $dashboardPort
               }
-              if (!(Test-TailscaleHttp $tailnetDns $downloadPort)) {
+              if ($tailnetDns -and !(Test-TailscaleHttp $tailnetDns $downloadPort)) {
                   Write-Warning "Download Tailscale proxy stopped responding; rebuilding it."
                   Set-TailscaleHttpProxy $downloadPort
               }
@@ -883,14 +929,17 @@ jobs:
               $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
               $ram = Get-CimInstance Win32_OperatingSystem
               $ramUsed = [math]::Round((($ram.TotalVisibleMemorySize - $ram.FreePhysicalMemory) / $ram.TotalVisibleMemorySize) * 100, 1)
-              $tsOk = ((& "C:\Program Files\Tailscale\tailscale.exe" status 2>$null) -match "github-rdp")
+              $tsState = & $tailscale status --json 2>$null | ConvertFrom-Json
+              $tsOk = [bool]($tsState.BackendState -eq 'Running')
               $ollamaOk = $false
               try { $null = Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 2; $ollamaOk = $true } catch {}
               $ip = (& $tailscale ip -4).Trim()
               $updated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
               $dashboardHtml = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Status</title><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}.bad{color:#f66}</style></head><body><h1>RDP Runner Status</h1><table><tr><td>IP</td><td>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>$freeGB GB</td></tr><tr><td>Ollama</td><td>$ollamaOk</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$updated</td></tr></table></body></html>"
               $dashboardHtml | Set-Content (Join-Path $desktop 'RDP-STATUS.html') -Encoding utf8
+              Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $desktop 'index.html') -Force
               Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $downloadDirectory 'RDP-STATUS.html') -Force
+              Update-DownloadIndex
               $line = "| $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | $cpuLoad% | $ramUsed% | $freeGB GB | $tsOk | $ollamaOk |"
               $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
               if (Test-Path (Join-Path $desktop 'RDP-STATUS.txt')) { Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nUpdated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | CPU: $cpuLoad% | RAM: $ramUsed% | Ollama: $ollamaOk" }
