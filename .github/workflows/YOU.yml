@@ -239,7 +239,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\actions-cache\installers
-          key: installers-${{ runner.os }}-python312-vscode-winrar-ollama-mpt-v136
+          key: installers-${{ runner.os }}-python312-vscode-winrar-ollama-mpt-v136-v2
 
       - name: '3b. Restore extracted Ollama'
         id: cache-extracted
@@ -456,7 +456,7 @@ jobs:
             Start-Job -ArgumentList $repo.Url, $repo.Target -ScriptBlock {
               param($Url, $Target)
               $env:GIT_TERMINAL_PROMPT = '0'
-              $gitOutput = & git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 clone --depth 1 --no-tags --filter=blob:none $Url $Target 2>&1
+              $gitOutput = & git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 clone --depth 1 --no-tags $Url $Target 2>&1
               $gitExitCode = $LASTEXITCODE
               $gitOutput | ForEach-Object { Write-Output $_.ToString() }
               if ($gitExitCode -ne 0) { throw "Git clone failed for $Url with exit code $gitExitCode." }
@@ -466,11 +466,19 @@ jobs:
             $ErrorActionPreference = 'Stop'
             $turboUrl = 'https://github.com/harry0703/MoneyPrinterTurbo/releases/download/v1.3.6/MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
             $turboArchive = 'C:\actions-cache\installers\MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
+            $turboPart = "$turboArchive.part"
             $turboTarget = 'D:\MoneyPrinters\MoneyPrinterTurbo'
             New-Item -ItemType Directory -Force -Path (Split-Path $turboArchive), $turboTarget | Out-Null
+            if ((Test-Path $turboArchive) -and (Get-Item $turboArchive).Length -lt 10MB) {
+              Write-Output 'Removing incomplete MoneyPrinterTurbo archive from cache.'
+              Remove-Item $turboArchive -Force
+            }
             if (!(Test-Path $turboArchive)) {
-              & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --speed-limit 1024 --speed-time 120 --output $turboArchive $turboUrl
+              Remove-Item $turboPart -Force -ErrorAction SilentlyContinue
+              & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --speed-limit 1024 --speed-time 120 --output $turboPart $turboUrl
               if ($LASTEXITCODE -ne 0) { throw "MoneyPrinterTurbo download failed with exit code $LASTEXITCODE." }
+              if (!(Test-Path $turboPart) -or (Get-Item $turboPart).Length -lt 10MB) { throw 'MoneyPrinterTurbo download is missing or unexpectedly small.' }
+              Move-Item $turboPart $turboArchive -Force
             } else {
               Write-Output 'Using cached MoneyPrinterTurbo portable archive.'
             }
@@ -488,14 +496,31 @@ jobs:
           $projectJobs = @($cloneJobs) + @($turboJob)
           $deadline = (Get-Date).AddMinutes(20)
           while ((Get-Date) -lt $deadline -and @($projectJobs | Where-Object State -in @('Running','NotStarted')).Count) {
+            $failedJobs = @($projectJobs | Where-Object State -eq 'Failed')
+            if ($failedJobs.Count) {
+              foreach ($failedJob in $failedJobs) { Receive-Job $failedJob -ErrorAction Continue }
+              $projectJobs | Where-Object State -in @('Running','NotStarted') | Stop-Job -ErrorAction SilentlyContinue
+              throw "A MoneyPrinter job failed: $($failedJobs.Id -join ', '). See its error directly above."
+            }
             $states = ($projectJobs | ForEach-Object { "Job $($_.Id)=$($_.State)" }) -join ' | '
             $archive = 'C:\actions-cache\installers\MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
-            $downloadedMB = if (Test-Path $archive) { [math]::Round((Get-Item $archive).Length / 1MB, 1) } else { 0 }
+            $partialArchive = "$archive.part"
+            $progressFile = if (Test-Path $partialArchive) { $partialArchive } elseif (Test-Path $archive) { $archive } else { $null }
+            $downloadedMB = if ($progressFile) { [math]::Round((Get-Item $progressFile).Length / 1MB, 1) } else { 0 }
             Write-Host "Projects: $states | Turbo downloaded: $downloadedMB MB"
             Start-Sleep 15
           }
+          $unfinishedJobs = @($projectJobs | Where-Object State -in @('Running','NotStarted'))
+          if ($unfinishedJobs.Count) {
+            $unfinishedJobs | Stop-Job -ErrorAction SilentlyContinue
+            foreach ($job in $projectJobs) { Receive-Job $job -ErrorAction Continue }
+            throw "MoneyPrinter jobs timed out after 20 minutes. Unfinished job IDs: $($unfinishedJobs.Id -join ', ')."
+          }
           foreach ($job in $projectJobs) {
-            if ($job.State -ne 'Completed') { Stop-Job $job; throw "A MoneyPrinter download failed or timed out." }
+            if ($job.State -ne 'Completed') {
+              Receive-Job $job -ErrorAction Continue
+              throw "MoneyPrinter job $($job.Id) ended in state $($job.State)."
+            }
             Receive-Job $job -ErrorAction Continue
             Remove-Job $job -Force
           }
