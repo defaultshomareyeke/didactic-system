@@ -39,8 +39,18 @@ on:
         required: false
         type: boolean
         default: true
-      install_projects:
-        description: 'Download MoneyPrinter projects'
+      install_moneyprinter:
+        description: 'Download MoneyPrinter'
+        required: false
+        type: boolean
+        default: false
+      install_moneyprinter_v2:
+        description: 'Download MoneyPrinterV2'
+        required: false
+        type: boolean
+        default: false
+      install_moneyprinter_turbo:
+        description: 'Download MoneyPrinterTurbo Portable 1.3.6'
         required: false
         type: boolean
         default: true
@@ -49,6 +59,15 @@ on:
         required: false
         type: boolean
         default: true
+      video_template:
+        description: 'Create video settings template'
+        required: false
+        type: choice
+        options:
+          - 'Shorts + Long'
+          - 'Shorts only'
+          - 'Long only'
+        default: 'Shorts + Long'
       keep_alive_hours:
         description: 'How many hours to keep the RDP runner alive'
         required: false
@@ -241,6 +260,27 @@ jobs:
           path: C:\actions-cache\installers
           key: installers-${{ runner.os }}-python312-vscode-winrar-ollama-mpt-v136-v2
 
+      - name: '2b. Start setup progress dashboard'
+        continue-on-error: true
+        shell: powershell
+        env:
+          DASHBOARD_PORT: ${{ inputs.dashboard_port }}
+        run: |
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          $port = [int]$env:DASHBOARD_PORT
+          $progressHtml = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:20%;background:#22c55e}code{color:#7dd3fc}</style></head><body><h1>RDP setup is running</h1><p id='status'>Tailscale and RDP are ready. Installing software...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 20%</p><p>This page refreshes every 15 seconds.</p></body></html>"
+          $progressHtml | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
+          $progressHtml | Set-Content (Join-Path $desktop 'RDP-STATUS.html') -Encoding utf8
+          $python = Get-ChildItem 'C:\hostedtoolcache\windows\Python\*\x64\python.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName -First 1
+          if (!$python) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
+          if (!$python) { throw 'No Python runtime is available for the setup dashboard.' }
+          $server = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -WindowStyle Hidden -RedirectStandardOutput 'D:\dashboard.log' -RedirectStandardError 'D:\dashboard-error.log'
+          $server.Id | Set-Content 'D:\dashboard.pid'
+          Start-Sleep -Seconds 2
+          $tailscale = 'C:\Program Files\Tailscale\tailscale.exe'
+          & $tailscale serve --bg --http=$port "http://127.0.0.1:$port"
+          if ($LASTEXITCODE -ne 0) { throw 'The setup dashboard Tailscale proxy could not be started.' }
+
       - name: '3b. Restore extracted Ollama'
         id: cache-extracted
         uses: actions/cache/restore@v4
@@ -258,6 +298,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Start-Transcript -Path "D:\install.log" -Force | Out-Null
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:30%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Installing selected software in parallel...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 30%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
           Write-Host "Installing Python, VS Code, WinRAR and qBittorrent to their default paths; Ollama to D:..."
           New-Item -ItemType Directory -Force -Path "C:\actions-cache\installers" | Out-Null
 
@@ -341,6 +383,9 @@ jobs:
           $maxWaitSeconds = 1800
           $deadline = (Get-Date).AddSeconds($maxWaitSeconds)
           while (((Get-Date) -lt $deadline) -and @($jobs | Where-Object { $_.State -in @('Running', 'NotStarted') }).Count -gt 0) {
+              $completedCount = @($jobs | Where-Object State -eq 'Completed').Count
+              $overall = [math]::Round(30 + (25 * $completedCount / [math]::Max(1, $jobs.Count)))
+              "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='10'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:$overall%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Software ready: $completedCount of $($jobs.Count)</p><div class='bar'><div class='fill'></div></div><p>Overall progress: $overall%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
               Start-Sleep -Seconds 5
           }
 
@@ -423,6 +468,7 @@ jobs:
           }
 
           Write-Host "All selected software installations completed."
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:55%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Software ready. Preparing projects...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 55%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
           Stop-Transcript | Out-Null
 
       - name: '3c. Save extracted Ollama'
@@ -432,26 +478,71 @@ jobs:
           path: D:\Ollama
           key: extracted-${{ runner.os }}-ollama-v2
 
-      - name: '4. Cache Ollama Models'
-        id: cache-ollama
-        if: ${{ inputs.pull_llama31_8b || inputs.pull_qwen35_9b || inputs.pull_qwen35_4b }}
+      - name: '4a. Restore llama3.1 8B cache'
+        id: cache-llama31
+        if: ${{ inputs.pull_llama31_8b }}
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.OLLAMA_MODELS }}
-          key: ollama-${{ runner.os }}-l31-${{ inputs.pull_llama31_8b }}-q35-9b-${{ inputs.pull_qwen35_9b }}-q35-4b-${{ inputs.pull_qwen35_4b }}
+          path: C:\actions-cache\ollama-model-packages\llama31-8b
+          key: ollama-${{ runner.os }}-llama31-8b-v1
+
+      - name: '4b. Restore qwen3.5 9B cache'
+        id: cache-qwen35-9b
+        if: ${{ inputs.pull_qwen35_9b }}
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\actions-cache\ollama-model-packages\qwen35-9b
+          key: ollama-${{ runner.os }}-qwen35-9b-v1
+
+      - name: '4c. Restore qwen3.5 4B cache'
+        id: cache-qwen35-4b
+        if: ${{ inputs.pull_qwen35_4b }}
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\actions-cache\ollama-model-packages\qwen35-4b
+          key: ollama-${{ runner.os }}-qwen35-4b-v1
+
+      - name: '4d. Merge selected model caches'
+        if: ${{ inputs.pull_llama31_8b || inputs.pull_qwen35_9b || inputs.pull_qwen35_4b }}
+        shell: powershell
+        env:
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:OLLAMA_MODELS | Out-Null
+          $packages = @()
+          if ($env:PULL_LLAMA31_8B -eq 'true') { $packages += 'C:\actions-cache\ollama-model-packages\llama31-8b\models' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { $packages += 'C:\actions-cache\ollama-model-packages\qwen35-9b\models' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { $packages += 'C:\actions-cache\ollama-model-packages\qwen35-4b\models' }
+          foreach ($package in $packages) {
+            if (Test-Path $package) {
+              & robocopy.exe $package $env:OLLAMA_MODELS /E /NFL /NDL /NJH /NJS /NP
+              if ($LASTEXITCODE -gt 7) { throw "Failed to merge Ollama model cache: $package" }
+            }
+          }
 
       - name: '5. Download MoneyPrinter Projects'
-        if: ${{ inputs.install_projects }}
+        if: ${{ inputs.install_moneyprinter || inputs.install_moneyprinter_v2 || inputs.install_moneyprinter_turbo }}
         shell: powershell
+        env:
+          INSTALL_MONEYPRINTER: ${{ inputs.install_moneyprinter }}
+          INSTALL_MONEYPRINTER_V2: ${{ inputs.install_moneyprinter_v2 }}
+          INSTALL_MONEYPRINTER_TURBO: ${{ inputs.install_moneyprinter_turbo }}
         run: |
           $ErrorActionPreference = "Stop"
           $Base = "D:\MoneyPrinters"
           New-Item -ItemType Directory -Force -Path $Base | Out-Null
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:60%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Downloading selected MoneyPrinter projects...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 60%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
 
-          $repositories = @(
-            @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinter.git'; Target = 'D:\MoneyPrinters\MoneyPrinter' },
-            @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinterV2.git'; Target = 'D:\MoneyPrinters\MoneyPrinterV2' }
-          )
+          $repositories = @()
+          if ($env:INSTALL_MONEYPRINTER -eq 'true') {
+            $repositories += @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinter.git'; Target = 'D:\MoneyPrinters\MoneyPrinter' }
+          }
+          if ($env:INSTALL_MONEYPRINTER_V2 -eq 'true') {
+            $repositories += @{ Url = 'https://github.com/FujiwaraChoki/MoneyPrinterV2.git'; Target = 'D:\MoneyPrinters\MoneyPrinterV2' }
+          }
           $cloneJobs = foreach ($repo in $repositories) {
             Start-Job -ArgumentList $repo.Url, $repo.Target -ScriptBlock {
               param($Url, $Target)
@@ -462,6 +553,8 @@ jobs:
               if ($gitExitCode -ne 0) { throw "Git clone failed for $Url with exit code $gitExitCode." }
             }
           }
+          $turboJob = $null
+          if ($env:INSTALL_MONEYPRINTER_TURBO -eq 'true') {
           $turboJob = Start-Job -ScriptBlock {
             $ErrorActionPreference = 'Stop'
             $turboUrl = 'https://github.com/harry0703/MoneyPrinterTurbo/releases/download/v1.3.6/MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
@@ -497,7 +590,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "MoneyPrinterTurbo extraction failed with exit code $LASTEXITCODE." }
             if (!(Get-ChildItem $turboTarget -Force -ErrorAction SilentlyContinue)) { throw 'MoneyPrinterTurbo extraction produced an empty folder.' }
           }
-          $projectJobs = @($cloneJobs) + @($turboJob)
+          }
+          $projectJobs = @($cloneJobs)
+          if ($turboJob) { $projectJobs += $turboJob }
           $deadline = (Get-Date).AddMinutes(20)
           while ((Get-Date) -lt $deadline -and @($projectJobs | Where-Object State -in @('Running','NotStarted')).Count) {
             $failedJobs = @($projectJobs | Where-Object State -eq 'Failed')
@@ -512,6 +607,9 @@ jobs:
             $progressFile = if (Test-Path $partialArchive) { $partialArchive } elseif (Test-Path $archive) { $archive } else { $null }
             $downloadedMB = if ($progressFile) { [math]::Round((Get-Item $progressFile).Length / 1MB, 1) } else { 0 }
             Write-Host "Projects: $states | Turbo downloaded: $downloadedMB MB"
+            $projectReady = @($projectJobs | Where-Object State -eq 'Completed').Count
+            $projectOverall = [math]::Round(60 + (20 * $projectReady / [math]::Max(1, $projectJobs.Count)))
+            "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='10'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:$projectOverall%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Projects ready: $projectReady of $($projectJobs.Count)</p><p>MoneyPrinterTurbo archive: $downloadedMB MB</p><div class='bar'><div class='fill'></div></div><p>Overall progress: $projectOverall%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
             Start-Sleep 15
           }
           $unfinishedJobs = @($projectJobs | Where-Object State -in @('Running','NotStarted'))
@@ -530,8 +628,10 @@ jobs:
           }
 
           Get-ChildItem $Base | Select-Object Name, FullName
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:80%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Projects ready. Preparing Ollama models...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 80%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
 
       - name: '5b. Download MoneyPrinterTurbo keys file'
+        if: ${{ inputs.install_moneyprinter_turbo }}
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -540,40 +640,20 @@ jobs:
           Invoke-WebRequest 'https://raw.githubusercontent.com/defaultshomareyeke/didactic-system/refs/heads/main/moneyprinterturbo-keys.json' -OutFile (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json')
           if (!(Test-Path (Join-Path $downloadDirectory 'moneyprinterturbo-keys.json'))) { throw 'moneyprinterturbo-keys.json download failed.' }
 
-      - name: '6. Prepare Fonts & Vazirmatn'
-        if: ${{ inputs.install_projects }}
+      - name: '6. Add Vazirmatn Regular to MoneyPrinterTurbo'
+        if: ${{ inputs.install_moneyprinter_turbo }}
         shell: powershell
         run: |
-          $Base = "D:\MoneyPrinters"
-          $Projects = @("$Base\MoneyPrinter", "$Base\MoneyPrinterV2", "$Base\MoneyPrinterTurbo")
-          foreach ($Project in $Projects) {
-              $Fonts = Join-Path $Project "fonts"
-              New-Item -ItemType Directory -Force -Path $Fonts | Out-Null
+          $ErrorActionPreference = 'Stop'
+          $fontDirectory = 'D:\MoneyPrinters\MoneyPrinterTurbo\resource\fonts'
+          $fontPath = Join-Path $fontDirectory 'Vazirmatn-Regular.ttf'
+          $fontUrl = 'https://raw.githubusercontent.com/rastikerdar/vazirmatn/master/fonts/ttf/Vazirmatn-Regular.ttf'
+          New-Item -ItemType Directory -Force -Path $fontDirectory | Out-Null
+          Invoke-WebRequest $fontUrl -OutFile $fontPath
+          if (!(Test-Path $fontPath) -or (Get-Item $fontPath).Length -lt 10KB) {
+              throw 'Vazirmatn-Regular.ttf download failed or produced an invalid file.'
           }
-
-          $fontJobs = foreach ($Project in $Projects) {
-              Start-Job -ArgumentList $Project -ScriptBlock {
-                  param($Target)
-                  $tmp = Join-Path $env:TEMP ("vazirmatn-" + [guid]::NewGuid())
-                  $gitOutput = & git clone --depth 1 --no-tags --filter=blob:none https://github.com/rastikerdar/vazirmatn.git $tmp 2>&1
-                  $gitExitCode = $LASTEXITCODE
-                  $gitOutput | ForEach-Object { Write-Output $_.ToString() }
-                  if ($gitExitCode -ne 0) { throw "Vazirmatn download failed with exit code $gitExitCode." }
-                  Get-ChildItem $tmp -Recurse -Include *.ttf,*.otf | ForEach-Object { Copy-Item $_.FullName (Join-Path $Target 'fonts') -Force }
-                  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-              }
-          }
-          Wait-Job $fontJobs -Timeout 900 | Out-Null
-          foreach ($job in $fontJobs) {
-              if ($job.State -ne 'Completed') {
-                  Receive-Job $job -ErrorAction Continue
-                  Remove-Job $job -Force
-                  throw "A Vazirmatn download failed or timed out."
-              }
-              Receive-Job $job -ErrorAction Continue
-              Remove-Job $job -Force
-          }
-          Write-Host "Vazirmatn installed."
+          Write-Host "Vazirmatn-Regular.ttf installed only in $fontDirectory"
 
       - name: '7. Create Desktop Shortcuts'
         if: ${{ inputs.create_shortcuts }}
@@ -582,6 +662,8 @@ jobs:
           PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
           PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
           PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
+          INSTALL_MONEYPRINTER_TURBO: ${{ inputs.install_moneyprinter_turbo }}
+          VIDEO_TEMPLATE: ${{ inputs.video_template }}
         run: |
           $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
           $ws = New-Object -ComObject WScript.Shell
@@ -598,6 +680,55 @@ jobs:
             }
           }
           @('start-ollama.bat','@echo off','start "" "D:\Ollama\ollama.exe" serve') -join "`r`n" | Set-Content (Join-Path $desktop 'start-ollama.bat')
+          if ($env:INSTALL_MONEYPRINTER_TURBO -eq 'true') {
+            $turboRoot = 'D:\MoneyPrinters\MoneyPrinterTurbo'
+            $turboStart = Get-ChildItem $turboRoot -Filter 'start.bat' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($turboStart) {
+              $turboLauncher = Join-Path $desktop 'Start-MoneyPrinterTurbo.bat'
+              @(
+                '@echo off',
+                'title MoneyPrinterTurbo',
+                "cd /d `"$($turboStart.DirectoryName)`"",
+                "call `"$($turboStart.FullName)`""
+              ) | Set-Content $turboLauncher -Encoding ascii
+              $lnk = $ws.CreateShortcut((Join-Path $desktop 'Start MoneyPrinterTurbo.lnk'))
+              $lnk.TargetPath = $turboLauncher
+              $lnk.WorkingDirectory = $turboStart.DirectoryName
+              $lnk.Save()
+            } else {
+              Write-Warning 'MoneyPrinterTurbo start.bat was not found; direct desktop shortcut was skipped.'
+            }
+          }
+
+          $shortTemplate = @'
+          Video type: YouTube Shorts
+          Aspect ratio: 9:16
+          Resolution: 1080x1920
+          Clip duration: 3 seconds
+          Match materials to script: On
+          Subtitle position: Custom
+          Custom position: 68
+          Font size: 38
+          Stroke width: 1.5
+          Encoder: libx264
+          '@
+          $longTemplate = @'
+          Video type: YouTube Long
+          Aspect ratio: 16:9
+          Resolution: 1920x1080
+          Clip duration: 4 seconds
+          Match materials to script: On
+          Subtitle position: Bottom
+          Font size: 42
+          Stroke width: 2
+          Encoder: libx264
+          '@
+          if ($env:VIDEO_TEMPLATE -in @('Shorts only','Shorts + Long')) {
+            $shortTemplate | Set-Content (Join-Path $desktop 'Video-Template-Shorts.txt') -Encoding utf8
+          }
+          if ($env:VIDEO_TEMPLATE -in @('Long only','Shorts + Long')) {
+            $longTemplate | Set-Content (Join-Path $desktop 'Video-Template-Long.txt') -Encoding utf8
+          }
           $selectedModels = @()
           if ($env:PULL_LLAMA31_8B -eq 'true') { $selectedModels += 'llama3.1:8b' }
           if ($env:PULL_QWEN35_9B -eq 'true') { $selectedModels += 'qwen3.5:9b' }
@@ -642,6 +773,8 @@ jobs:
           PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
         run: |
           $ErrorActionPreference = "Stop"
+          $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+          "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='15'><title>RDP Setup</title><style>body{font-family:Segoe UI;background:#111827;color:#f8fafc;max-width:760px;margin:60px auto;padding:24px}.bar{height:24px;background:#334155;border-radius:14px;overflow:hidden}.fill{height:100%;width:85%;background:#22c55e}</style></head><body><h1>RDP setup</h1><p>Verifying and downloading selected Ollama models...</p><div class='bar'><div class='fill'></div></div><p>Overall progress: 85%</p></body></html>" | Set-Content (Join-Path $desktop 'index.html') -Encoding utf8
           $ollamaExe = "D:\Ollama\ollama.exe"
           if (!(Test-Path $ollamaExe)) { throw "Ollama executable is missing." }
           $server = Start-Process -FilePath $ollamaExe -ArgumentList "serve" -PassThru -RedirectStandardOutput "D:\Ollama\server.log" -RedirectStandardError "D:\Ollama\server-error.log"
@@ -667,12 +800,59 @@ jobs:
           }
           Write-Host "Selected Ollama models: $($models -join ', ')"
 
-      - name: 'Save Ollama models before the RDP session'
-        if: ${{ (inputs.pull_llama31_8b || inputs.pull_qwen35_9b || inputs.pull_qwen35_4b) && steps.cache-ollama.outputs.cache-hit != 'true' }}
+      - name: '8b. Package selected Ollama models independently'
+        if: ${{ inputs.pull_llama31_8b || inputs.pull_qwen35_9b || inputs.pull_qwen35_4b }}
+        shell: powershell
+        env:
+          PULL_LLAMA31_8B: ${{ inputs.pull_llama31_8b }}
+          PULL_QWEN35_9B: ${{ inputs.pull_qwen35_9b }}
+          PULL_QWEN35_4B: ${{ inputs.pull_qwen35_4b }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Export-OllamaModel([string]$ModelName, [string]$PackageName) {
+            $parts = $ModelName.Split(':', 2)
+            $name = $parts[0]
+            $tag = if ($parts.Count -gt 1) { $parts[1] } else { 'latest' }
+            $manifest = Join-Path $env:OLLAMA_MODELS "manifests\registry.ollama.ai\library\$name\$tag"
+            if (!(Test-Path $manifest)) { throw "Manifest not found for $ModelName at $manifest" }
+            $packageRoot = "C:\actions-cache\ollama-model-packages\$PackageName\models"
+            $manifestTarget = Join-Path $packageRoot "manifests\registry.ollama.ai\library\$name\$tag"
+            New-Item -ItemType Directory -Force -Path (Split-Path $manifestTarget), (Join-Path $packageRoot 'blobs') | Out-Null
+            Copy-Item $manifest $manifestTarget -Force
+            $data = Get-Content $manifest -Raw | ConvertFrom-Json
+            $digests = @($data.config.digest) + @($data.layers | ForEach-Object digest)
+            foreach ($digest in ($digests | Where-Object { $_ } | Select-Object -Unique)) {
+              $blobName = $digest.Replace(':','-')
+              $source = Join-Path $env:OLLAMA_MODELS "blobs\$blobName"
+              if (!(Test-Path $source)) { throw "Blob missing for $ModelName: $source" }
+              Copy-Item $source (Join-Path $packageRoot "blobs\$blobName") -Force
+            }
+            Write-Host "$ModelName packaged independently in $packageRoot"
+          }
+          if ($env:PULL_LLAMA31_8B -eq 'true') { Export-OllamaModel 'llama3.1:8b' 'llama31-8b' }
+          if ($env:PULL_QWEN35_9B -eq 'true') { Export-OllamaModel 'qwen3.5:9b' 'qwen35-9b' }
+          if ($env:PULL_QWEN35_4B -eq 'true') { Export-OllamaModel 'qwen3.5:4b' 'qwen35-4b' }
+
+      - name: '8c. Save llama3.1 8B cache'
+        if: ${{ inputs.pull_llama31_8b && steps.cache-llama31.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.OLLAMA_MODELS }}
-          key: ${{ steps.cache-ollama.outputs.cache-primary-key }}
+          path: C:\actions-cache\ollama-model-packages\llama31-8b
+          key: ollama-${{ runner.os }}-llama31-8b-v1
+
+      - name: '8d. Save qwen3.5 9B cache'
+        if: ${{ inputs.pull_qwen35_9b && steps.cache-qwen35-9b.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: C:\actions-cache\ollama-model-packages\qwen35-9b
+          key: ollama-${{ runner.os }}-qwen35-9b-v1
+
+      - name: '8e. Save qwen3.5 4B cache'
+        if: ${{ inputs.pull_qwen35_4b && steps.cache-qwen35-4b.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: C:\actions-cache\ollama-model-packages\qwen35-4b
+          key: ollama-${{ runner.os }}-qwen35-4b-v1
 
       - name: '9. Create Desktop Status & Dashboard'
         shell: powershell
@@ -706,15 +886,17 @@ jobs:
           Ollama models: $modelText
           D free: $freeGB GB
           Scheduled shutdown: $($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))
+          Setup: Complete (100%)
           Updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
           "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.txt')
           @"
           <!doctype html><html><head><meta charset='utf-8'><title>RDP Status</title><meta http-equiv='refresh' content='60'><style>body{font-family:Segoe UI;background:#111;color:#eee;padding:30px}table{border-collapse:collapse}td{padding:10px 18px;border-bottom:1px solid #444}.ok{color:#6f6}</style></head><body><h1>RDP Runner Status</h1><table>
-          <tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
+          <tr><td>Setup</td><td class='ok'>Complete (100%)</td></tr><tr><td>IP</td><td id='ip'>$ip</td></tr><tr><td>Ollama models</td><td>$modelText</td></tr><tr><td>CPU</td><td>$cpuLoad%</td></tr><tr><td>RAM</td><td>$ramUsed%</td></tr><tr><td>D free</td><td>${freeGB} GB</td></tr><tr><td>Scheduled shutdown</td><td>$($shutdown.ToString('yyyy-MM-dd HH:mm:ss'))</td></tr><tr><td>Updated</td><td>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</td></tr></table><p class='ok'>Ollama dashboard is running on localhost:11434</p></body></html>
           "@ | Set-Content (Join-Path $desktop 'RDP-STATUS.html')
           Copy-Item (Join-Path $desktop 'RDP-STATUS.html') (Join-Path $desktop 'index.html') -Force
 
       - name: '9. Serve Dashboard on Network'
+        continue-on-error: true
         shell: powershell
         env:
           DASHBOARD_PORT: ${{ inputs.dashboard_port }}
@@ -726,11 +908,16 @@ jobs:
           $python = "C:\Program Files\Python312\python.exe"
           if (!(Test-Path $python)) { $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source }
           if (!$python) { throw "Python is required to serve the dashboard." }
-          $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
-          $dashboard.Id | Set-Content 'D:\dashboard.pid'
-          Start-Sleep -Seconds 2
-          if ($dashboard.HasExited) { throw "Dashboard web server failed to start." }
-          $null = Invoke-WebRequest "http://127.0.0.1:$port/RDP-STATUS.html" -UseBasicParsing -TimeoutSec 5
+          $dashboardReady = $false
+          try { $dashboardReady = (Invoke-WebRequest "http://127.0.0.1:$port/RDP-STATUS.html" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 } catch {}
+          if (!$dashboardReady) {
+            $dashboard = Start-Process -FilePath $python -ArgumentList @('-m','http.server',"$port",'--bind','127.0.0.1','--directory',$desktop) -PassThru -RedirectStandardOutput "D:\dashboard.log" -RedirectStandardError "D:\dashboard-error.log"
+            $dashboard.Id | Set-Content 'D:\dashboard.pid'
+            Start-Sleep -Seconds 2
+            if ($dashboard.HasExited) { throw "Dashboard web server failed to start." }
+          } else {
+            Write-Host 'Reusing the setup progress dashboard server.'
+          }
           $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
           & $tailscale serve --bg --http=$port "http://127.0.0.1:$port"
           if ($LASTEXITCODE -ne 0) { throw "Tailscale HTTP Serve failed for dashboard port $port." }
@@ -746,6 +933,7 @@ jobs:
           Add-Content (Join-Path $desktop 'RDP-STATUS.txt') "`nDashboard URL: $url"
 
       - name: '9b. Start Browser Download Server'
+        continue-on-error: true
         shell: powershell
         env:
           DOWNLOAD_PORT: ${{ inputs.download_port }}
@@ -755,18 +943,38 @@ jobs:
           $port = [int]$env:DOWNLOAD_PORT
           if ($port -lt 1024 -or $port -gt 65535) { throw "Download port must be between 1024 and 65535." }
           New-Item -ItemType Directory -Force -Path $downloadDirectory | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $downloadDirectory 'Shorts'), (Join-Path $downloadDirectory 'Long Videos') | Out-Null
           $dashboardFile = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'RDP-STATUS.html'
           if (Test-Path $dashboardFile) { Copy-Item $dashboardFile (Join-Path $downloadDirectory 'RDP-STATUS.html') -Force }
-          $fileRows = @(Get-ChildItem $downloadDirectory -File | Where-Object Name -ne 'index.html' | Sort-Object Name | ForEach-Object {
-              $name = [Net.WebUtility]::HtmlEncode($_.Name)
-              $urlName = [uri]::EscapeDataString($_.Name)
-              $size = if ($_.Length -ge 1GB) { '{0:N2} GB' -f ($_.Length / 1GB) } elseif ($_.Length -ge 1MB) { '{0:N1} MB' -f ($_.Length / 1MB) } else { '{0:N0} KB' -f [math]::Max(1, ($_.Length / 1KB)) }
-              "<tr><td><a href='$urlName'>$name</a></td><td>$size</td><td>$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))</td></tr>"
+          @'
+          param([string]$DownloadDirectory = 'D:\Downloads')
+          $hashDbPath = 'D:\download-hashes.json'
+          $hashRecords = @()
+          if (Test-Path $hashDbPath) {
+            try { $hashRecords = @(Get-Content $hashDbPath -Raw | ConvertFrom-Json) } catch { $hashRecords = @() }
+          }
+          $newRecords = @()
+          $rows = @(Get-ChildItem $DownloadDirectory -File -Recurse | Where-Object { $_.Name -notin @('index.html','RDP-STATUS.html') } | Sort-Object FullName | ForEach-Object {
+            $file = $_
+            $relative = $file.FullName.Substring($DownloadDirectory.Length).TrimStart('\')
+            $group = if ($relative -like 'Shorts\*') { 'Shorts' } elseif ($relative -like 'Long Videos\*') { 'Long Videos' } else { 'Other' }
+            $signature = "$($file.Length):$($file.LastWriteTimeUtc.Ticks)"
+            $cached = $hashRecords | Where-Object { $_.path -eq $file.FullName -and $_.signature -eq $signature } | Select-Object -First 1
+            $sha = if ($cached) { $cached.sha256 } else { (Get-FileHash $file.FullName -Algorithm SHA256).Hash }
+            $newRecords += [pscustomobject]@{ path=$file.FullName; signature=$signature; sha256=$sha }
+            $name = [Net.WebUtility]::HtmlEncode($file.Name)
+            $url = [uri]::EscapeUriString($relative.Replace('\','/'))
+            $size = if ($file.Length -ge 1GB) { '{0:N2} GB' -f ($file.Length / 1GB) } elseif ($file.Length -ge 1MB) { '{0:N1} MB' -f ($file.Length / 1MB) } else { '{0:N0} KB' -f [math]::Max(1, ($file.Length / 1KB)) }
+            $type = if ($file.Extension) { $file.Extension.TrimStart('.').ToUpperInvariant() } else { 'FILE' }
+            $shortHash = $sha.Substring(0,16) + '...'
+            "<tr><td>$group</td><td>$name</td><td>$type</td><td>$size</td><td>$($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))</td><td><code title='$sha'>$shortHash</code></td><td><a class='button' href='$url' download>Download</a></td></tr>"
           }) -join "`n"
-          if ([string]::IsNullOrWhiteSpace($fileRows)) { $fileRows = '<tr><td colspan="3">No files are available yet.</td></tr>' }
-          @"
-          <!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Downloads</title><style>body{font-family:Segoe UI;background:#10131a;color:#eef;padding:32px;max-width:1000px;margin:auto}h1{color:#7dd3fc}table{width:100%;border-collapse:collapse;background:#181d28}th,td{text-align:left;padding:13px;border-bottom:1px solid #303849}a{color:#86efac;text-decoration:none}a:hover{text-decoration:underline}.note{color:#aab4c8}</style></head><body><h1>RDP Downloads</h1><p class='note'>Files placed in D:\Downloads appear here automatically. This page refreshes every 60 seconds.</p><p><a href='RDP-STATUS.html'>Open server status</a></p><table><thead><tr><th>File</th><th>Size</th><th>Updated</th></tr></thead><tbody>$fileRows</tbody></table></body></html>
-          "@ | Set-Content (Join-Path $downloadDirectory 'index.html') -Encoding utf8
+          $newRecords | ConvertTo-Json | Set-Content $hashDbPath -Encoding utf8
+          if ([string]::IsNullOrWhiteSpace($rows)) { $rows = '<tr><td colspan="7">No files are available yet.</td></tr>' }
+          $html = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Downloads</title><style>body{font-family:Segoe UI;background:#10131a;color:#eef;padding:32px;max-width:1200px;margin:auto}h1{color:#7dd3fc}table{width:100%;border-collapse:collapse;background:#181d28}th,td{text-align:left;padding:12px;border-bottom:1px solid #303849}a{color:#86efac;text-decoration:none}.button{display:inline-block;background:#16a34a;color:white;padding:7px 12px;border-radius:7px}code{color:#c4b5fd}.note{color:#aab4c8}</style></head><body><h1>RDP Downloads</h1><p class='note'>Use the Shorts and Long Videos folders. This page refreshes every 60 seconds.</p><p><a href='RDP-STATUS.html'>Open server status</a></p><table><thead><tr><th>Folder</th><th>File</th><th>Type</th><th>Size</th><th>Updated</th><th>SHA-256</th><th>Action</th></tr></thead><tbody>$rows</tbody></table></body></html>"
+          $html | Set-Content (Join-Path $DownloadDirectory 'index.html') -Encoding utf8
+          '@ | Set-Content 'D:\Update-DownloadIndex.ps1' -Encoding utf8
+          & 'D:\Update-DownloadIndex.ps1' -DownloadDirectory $downloadDirectory
           New-NetFirewallRule -DisplayName "Browser Download Server $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
           $python = "C:\Program Files\Python312\python.exe"
@@ -835,7 +1043,12 @@ jobs:
           }
 
           function Get-TailscaleDnsName {
-              $dnsName = ((& $tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+              try {
+                  $dnsName = ((& $tailscale status --json 2>$null | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
+              } catch {
+                  Write-Warning "Tailscale status check failed without stopping RDP: $($_.Exception.Message)"
+                  return $null
+              }
               if ([string]::IsNullOrWhiteSpace($dnsName)) {
                   Write-Warning 'Tailscale MagicDNS name is temporarily unavailable.'
                   return $null
@@ -854,15 +1067,15 @@ jobs:
           }
 
           function Update-DownloadIndex {
-              $fileRows = @(Get-ChildItem $downloadDirectory -File | Where-Object Name -ne 'index.html' | Sort-Object Name | ForEach-Object {
-                  $name = [Net.WebUtility]::HtmlEncode($_.Name)
-                  $urlName = [uri]::EscapeDataString($_.Name)
-                  $size = if ($_.Length -ge 1GB) { '{0:N2} GB' -f ($_.Length / 1GB) } elseif ($_.Length -ge 1MB) { '{0:N1} MB' -f ($_.Length / 1MB) } else { '{0:N0} KB' -f [math]::Max(1, ($_.Length / 1KB)) }
-                  "<tr><td><a href='$urlName'>$name</a></td><td>$size</td><td>$($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm'))</td></tr>"
-              }) -join "`n"
-              if ([string]::IsNullOrWhiteSpace($fileRows)) { $fileRows = '<tr><td colspan="3">No files are available yet.</td></tr>' }
-              $html = "<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='60'><title>RDP Downloads</title><style>body{font-family:Segoe UI;background:#10131a;color:#eef;padding:32px;max-width:1000px;margin:auto}h1{color:#7dd3fc}table{width:100%;border-collapse:collapse;background:#181d28}th,td{text-align:left;padding:13px;border-bottom:1px solid #303849}a{color:#86efac;text-decoration:none}a:hover{text-decoration:underline}.note{color:#aab4c8}</style></head><body><h1>RDP Downloads</h1><p class='note'>Files placed in D:\Downloads appear here automatically. This page refreshes every 60 seconds.</p><p><a href='RDP-STATUS.html'>Open server status</a></p><table><thead><tr><th>File</th><th>Size</th><th>Updated</th></tr></thead><tbody>$fileRows</tbody></table></body></html>"
-              $html | Set-Content (Join-Path $downloadDirectory 'index.html') -Encoding utf8
+              try {
+                  if (Test-Path 'D:\Update-DownloadIndex.ps1') {
+                      & 'D:\Update-DownloadIndex.ps1' -DownloadDirectory $downloadDirectory
+                  } else {
+                      Write-Warning 'Download index updater is missing; keeping the existing index page.'
+                  }
+              } catch {
+                  Write-Warning "Download index update failed without stopping RDP: $($_.Exception.Message)"
+              }
           }
 
           function Restart-HttpServer([int]$Port, [string]$Directory, [string]$LogName) {
@@ -890,8 +1103,12 @@ jobs:
           if ($env:PULL_QWEN35_4B -eq 'true') { $models += 'qwen3.5:4b' }
           $modelText = if ($models.Count) { $models -join ', ' } else { 'None' }
           $shutdown = (Get-Date).AddHours([double]$env:KEEP_ALIVE_HOURS)
-          if (!(Test-HttpServer $dashboardPort '/RDP-STATUS.html')) { Restart-HttpServer $dashboardPort $desktop 'dashboard' }
-          if (!(Test-HttpServer $downloadPort)) { Restart-HttpServer $downloadPort $downloadDirectory 'download-server' }
+          if (!(Test-HttpServer $dashboardPort '/RDP-STATUS.html')) {
+              try { Restart-HttpServer $dashboardPort $desktop 'dashboard' } catch { Write-Warning "Dashboard recovery failed without stopping RDP: $($_.Exception.Message)" }
+          }
+          if (!(Test-HttpServer $downloadPort)) {
+              try { Restart-HttpServer $downloadPort $downloadDirectory 'download-server' } catch { Write-Warning "Download server recovery failed without stopping RDP: $($_.Exception.Message)" }
+          }
           $tailscale = "C:\Program Files\Tailscale\tailscale.exe"
           Set-TailscaleHttpProxy $dashboardPort
           Set-TailscaleHttpProxy $downloadPort
@@ -907,11 +1124,11 @@ jobs:
               Start-Sleep -Seconds 60
               if (!(Test-HttpServer $dashboardPort '/RDP-STATUS.html')) {
                   Write-Warning "Dashboard stopped responding; restarting it."
-                  Restart-HttpServer $dashboardPort $desktop 'dashboard'
+                  try { Restart-HttpServer $dashboardPort $desktop 'dashboard' } catch { Write-Warning "Dashboard recovery failed without stopping RDP: $($_.Exception.Message)" }
               }
               if (!(Test-HttpServer $downloadPort)) {
                   Write-Warning "Download server stopped responding; restarting it."
-                  Restart-HttpServer $downloadPort $downloadDirectory 'download-server'
+                  try { Restart-HttpServer $downloadPort $downloadDirectory 'download-server' } catch { Write-Warning "Download server recovery failed without stopping RDP: $($_.Exception.Message)" }
               }
               $ip = (& $tailscale ip -4).Trim()
               $tailnetDns = Get-TailscaleDnsName
