@@ -475,8 +475,12 @@ jobs:
             }
             if (!(Test-Path $turboArchive)) {
               Remove-Item $turboPart -Force -ErrorAction SilentlyContinue
-              & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --speed-limit 1024 --speed-time 120 --output $turboPart $turboUrl
-              if ($LASTEXITCODE -ne 0) { throw "MoneyPrinterTurbo download failed with exit code $LASTEXITCODE." }
+              $previousErrorAction = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              & curl.exe --silent --show-error --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --speed-limit 1024 --speed-time 120 --output $turboPart $turboUrl
+              $curlExitCode = $LASTEXITCODE
+              $ErrorActionPreference = $previousErrorAction
+              if ($curlExitCode -ne 0) { throw "MoneyPrinterTurbo download failed with curl exit code $curlExitCode. URL: $turboUrl" }
               if (!(Test-Path $turboPart) -or (Get-Item $turboPart).Length -lt 10MB) { throw 'MoneyPrinterTurbo download is missing or unexpectedly small.' }
               Move-Item $turboPart $turboArchive -Force
             } else {
