@@ -461,10 +461,22 @@ jobs:
               $extensionsDirectory = "D:\VSCodeExtensions"
               New-Item -ItemType Directory -Force -Path $extensionsDirectory | Out-Null
               if (!(Test-Path $codeCommand)) { throw "VS Code command line tool is missing: $codeCommand" }
-              & $codeCommand --extensions-dir $extensionsDirectory --install-extension ms-python.python --force
-              if ($LASTEXITCODE -ne 0) { throw "VS Code Python extension installation failed." }
               [System.Environment]::SetEnvironmentVariable("VSCODE_EXTENSIONS", $extensionsDirectory, "Machine")
-              Write-Host "VS Code Python extension installed in $extensionsDirectory."
+              $extensionInstalled = $false
+              for ($attempt = 1; $attempt -le 5; $attempt++) {
+                  Write-Host "Installing VS Code Python extension (attempt $attempt of 5)..."
+                  & $codeCommand --extensions-dir $extensionsDirectory --install-extension ms-python.python --force
+                  if ($LASTEXITCODE -eq 0) {
+                      $extensionInstalled = $true
+                      break
+                  }
+                  if ($attempt -lt 5) { Start-Sleep -Seconds (10 * $attempt) }
+              }
+              if ($extensionInstalled) {
+                  Write-Host "VS Code Python extension installed in $extensionsDirectory."
+              } else {
+                  Write-Warning "VS Code Marketplace is unavailable. Python extension was skipped; the workflow and RDP will continue. Install ms-python.python later from VS Code when the service is available."
+              }
           }
 
           Write-Host "All selected software installations completed."
