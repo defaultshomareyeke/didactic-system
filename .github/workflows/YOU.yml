@@ -455,7 +455,8 @@ jobs:
           $cloneJobs = foreach ($repo in $repositories) {
             Start-Job -ArgumentList $repo.Url, $repo.Target -ScriptBlock {
               param($Url, $Target)
-              $gitOutput = & git clone --depth 1 --no-tags --filter=blob:none $Url $Target 2>&1
+              $env:GIT_TERMINAL_PROMPT = '0'
+              $gitOutput = & git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=120 clone --depth 1 --no-tags --filter=blob:none $Url $Target 2>&1
               $gitExitCode = $LASTEXITCODE
               $gitOutput | ForEach-Object { Write-Output $_.ToString() }
               if ($gitExitCode -ne 0) { throw "Git clone failed for $Url with exit code $gitExitCode." }
@@ -468,7 +469,8 @@ jobs:
             $turboTarget = 'D:\MoneyPrinters\MoneyPrinterTurbo'
             New-Item -ItemType Directory -Force -Path (Split-Path $turboArchive), $turboTarget | Out-Null
             if (!(Test-Path $turboArchive)) {
-              Invoke-WebRequest $turboUrl -OutFile $turboArchive
+              & curl.exe --location --fail --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --speed-limit 1024 --speed-time 120 --output $turboArchive $turboUrl
+              if ($LASTEXITCODE -ne 0) { throw "MoneyPrinterTurbo download failed with exit code $LASTEXITCODE." }
             } else {
               Write-Output 'Using cached MoneyPrinterTurbo portable archive.'
             }
@@ -485,7 +487,13 @@ jobs:
           }
           $projectJobs = @($cloneJobs) + @($turboJob)
           $deadline = (Get-Date).AddMinutes(20)
-          while ((Get-Date) -lt $deadline -and @($projectJobs | Where-Object State -in @('Running','NotStarted')).Count) { Start-Sleep 3 }
+          while ((Get-Date) -lt $deadline -and @($projectJobs | Where-Object State -in @('Running','NotStarted')).Count) {
+            $states = ($projectJobs | ForEach-Object { "Job $($_.Id)=$($_.State)" }) -join ' | '
+            $archive = 'C:\actions-cache\installers\MoneyPrinterTurbo-Portable-Windows-1.3.6.7z'
+            $downloadedMB = if (Test-Path $archive) { [math]::Round((Get-Item $archive).Length / 1MB, 1) } else { 0 }
+            Write-Host "Projects: $states | Turbo downloaded: $downloadedMB MB"
+            Start-Sleep 15
+          }
           foreach ($job in $projectJobs) {
             if ($job.State -ne 'Completed') { Stop-Job $job; throw "A MoneyPrinter download failed or timed out." }
             Receive-Job $job -ErrorAction Continue
