@@ -836,7 +836,7 @@ jobs:
             foreach ($digest in ($digests | Where-Object { $_ } | Select-Object -Unique)) {
               $blobName = $digest.Replace(':','-')
               $source = Join-Path $env:OLLAMA_MODELS "blobs\$blobName"
-              if (!(Test-Path $source)) { throw "Blob missing for $ModelName: $source" }
+              if (!(Test-Path $source)) { throw "Blob missing for ${ModelName}: $source" }
               Copy-Item $source (Join-Path $packageRoot "blobs\$blobName") -Force
             }
             Write-Host "$ModelName packaged independently in $packageRoot"
